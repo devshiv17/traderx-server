@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     # CORS Configuration
     allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:3001", "http://localhost:5173"]
     
+    # Angel One Configuration
+    angel_one_api_key: str = ""
+    angel_one_secret: str = ""
+    angel_one_client_code: str = ""
+    angel_one_pin: str = ""
+    angel_one_totp_token: str = ""
+    
     model_config = ConfigDict(
         env_file=".env",
         case_sensitive=True,

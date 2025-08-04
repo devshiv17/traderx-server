@@ -10,6 +10,7 @@ from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import pyotp
 from logzero import logger
 from ..core.database import get_collection
+from ..core.config import settings
 from ..models.signal import SignalModel
 from ..models.market_data import MarketDataModel
 from ..ws import broadcast_market_data, broadcast_price_update
@@ -33,11 +34,11 @@ IST = pytz.timezone('Asia/Kolkata')
 
 class AngelOneService:
     def __init__(self):
-        self.api_key = "${ANGEL_ONE_API_KEY}"
-        self.secret = "${ANGEL_ONE_SECRET}"
-        self.client_code = "${ANGEL_ONE_CLIENT_CODE}"  # TODO: Fill with your real client code
-        self.pin = "${ANGEL_ONE_PIN}"  # TODO: Fill with your real PIN
-        self.totp_token = "${ANGEL_ONE_TOTP_TOKEN}"  # TODO: Fill with your TOTP token (QR code value)
+        self.api_key = settings.angel_one_api_key
+        self.secret = settings.angel_one_secret
+        self.client_code = settings.angel_one_client_code
+        self.pin = settings.angel_one_pin
+        self.totp_token = settings.angel_one_totp_token
         
         # SmartAPI objects
         self.smart_api = None

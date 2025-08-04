@@ -5,16 +5,17 @@ import hashlib
 import hmac
 import time
 from typing import Dict, Any, Optional
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class AngelOneRestClient:
     def __init__(self):
-        self.api_key = "${ANGEL_ONE_API_KEY}"
-        self.secret = "${ANGEL_ONE_SECRET}"
-        self.client_code = "${ANGEL_ONE_CLIENT_CODE}"  # Replace with your actual client code
-        self.pin = "${ANGEL_ONE_PIN}"  # Replace with your actual PIN
+        self.api_key = settings.angel_one_api_key
+        self.secret = settings.angel_one_secret
+        self.client_code = settings.angel_one_client_code
+        self.pin = settings.angel_one_pin
         self.base_url = "https://apiconnect.angelbroking.com"
         self.access_token = None
         self.refresh_token = None
