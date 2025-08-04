@@ -1,0 +1,25 @@
+# Bypass dependency resolution - use latest compatible versions
+--force-reinstall
+--no-deps
+
+# Install in specific order to avoid conflicts
+pip==25.2
+setuptools
+wheel
+
+# Core FastAPI with latest versions only
+fastapi==0.115.0
+uvicorn==0.30.6
+
+# Database packages
+motor==3.5.1
+pymongo==4.10.1
+
+# Latest Pydantic that works with Python 3.13
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# Other packages
+python-multipart==0.0.12
+python-dotenv==1.0.1
+aiohttp==3.10.5
