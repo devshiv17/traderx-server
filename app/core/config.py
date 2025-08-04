@@ -1,6 +1,5 @@
 from typing import List
-from pydantic_settings import BaseSettings
-from pydantic import validator, ConfigDict
+from pydantic import BaseSettings, validator
 import os
 
 
@@ -29,11 +28,10 @@ class Settings(BaseSettings):
     angel_one_pin: str = ""
     angel_one_totp_token: str = ""
     
-    model_config = ConfigDict(
-        env_file=".env",
-        case_sensitive=True,
-        extra="ignore"
-    )
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+        extra = "ignore"
     
     @validator("allowed_origins", pre=True)
     def assemble_cors_origins(cls, v):
