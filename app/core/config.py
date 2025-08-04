@@ -1,6 +1,20 @@
 from typing import List
-from pydantic import BaseSettings, validator
 import os
+
+try:
+    # Pydantic v2 - BaseSettings moved to pydantic-settings
+    from pydantic_settings import BaseSettings
+    from pydantic import field_validator, ConfigDict
+    PYDANTIC_V2 = True
+except ImportError:
+    try:
+        # Pydantic v2 early versions
+        from pydantic import BaseSettings, validator
+        PYDANTIC_V2 = True
+    except ImportError:
+        # Pydantic v1
+        from pydantic import BaseSettings, validator
+        PYDANTIC_V2 = False
 
 
 class Settings(BaseSettings):
@@ -28,18 +42,35 @@ class Settings(BaseSettings):
     angel_one_pin: str = ""
     angel_one_totp_token: str = ""
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "ignore"
+    if PYDANTIC_V2:
+        model_config = ConfigDict(
+            env_file=".env",
+            case_sensitive=True,
+            extra="ignore"
+        )
+    else:
+        class Config:
+            env_file = ".env"
+            case_sensitive = True
+            extra = "ignore"
     
-    @validator("allowed_origins", pre=True)
-    def assemble_cors_origins(cls, v):
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
+    if PYDANTIC_V2:
+        @field_validator("allowed_origins", mode="before")
+        @classmethod
+        def assemble_cors_origins(cls, v):
+            if isinstance(v, str) and not v.startswith("["):
+                return [i.strip() for i in v.split(",")]
+            elif isinstance(v, (list, str)):
+                return v
+            raise ValueError(v)
+    else:
+        @validator("allowed_origins", pre=True)
+        def assemble_cors_origins(cls, v):
+            if isinstance(v, str) and not v.startswith("["):
+                return [i.strip() for i in v.split(",")]
+            elif isinstance(v, (list, str)):
+                return v
+            raise ValueError(v)
 
 
 settings = Settings() 
