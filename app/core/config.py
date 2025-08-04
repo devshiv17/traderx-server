@@ -1,5 +1,9 @@
 from typing import List
 import os
+from dotenv import load_dotenv
+
+# Load .env file explicitly
+load_dotenv()
 
 try:
     # Pydantic v2 - BaseSettings moved to pydantic-settings
@@ -36,11 +40,11 @@ class Settings(BaseSettings):
     allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:3001", "http://localhost:5173"]
     
     # Angel One Configuration
-    angel_one_api_key: str = ""
-    angel_one_secret: str = ""
-    angel_one_client_code: str = ""
-    angel_one_pin: str = ""
-    angel_one_totp_token: str = ""
+    angel_one_api_key: str = os.getenv("ANGEL_ONE_API_KEY", "")
+    angel_one_secret: str = os.getenv("ANGEL_ONE_SECRET", "")
+    angel_one_client_code: str = os.getenv("ANGEL_ONE_CLIENT_CODE", "")  
+    angel_one_pin: str = os.getenv("ANGEL_ONE_PIN", "")
+    angel_one_totp_token: str = os.getenv("ANGEL_ONE_TOTP_TOKEN", "")
     
     if PYDANTIC_V2:
         model_config = ConfigDict(
