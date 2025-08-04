@@ -12,12 +12,9 @@ pip install --no-deps uvicorn==0.30.6
 pip install --no-deps motor==3.5.1
 pip install --no-deps pymongo==4.10.1
 
-# Install pydantic-core first (required dependency)
-pip install pydantic-core
-
-# Install latest pydantic that should work
-pip install --no-deps pydantic==2.9.2
-pip install --no-deps pydantic-settings==2.5.2
+# Install pydantic with compatible pydantic-core (let pip resolve versions)
+pip install pydantic==2.9.2
+pip install pydantic-settings==2.5.2
 
 # Install remaining packages
 pip install --no-deps python-multipart==0.0.12
