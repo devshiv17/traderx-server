@@ -1,8 +1,8 @@
 # Ultra minimal - only packages with guaranteed pre-built wheels
 fastapi==0.95.2
 uvicorn==0.22.0
-motor==3.2.0
-pymongo==4.4.1
+motor==3.1.2
+pymongo==4.6.0
 pydantic==1.10.12
 python-multipart==0.0.6
 python-dotenv==1.0.0
