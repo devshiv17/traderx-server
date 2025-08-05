@@ -280,12 +280,23 @@ async def get_monitoring_status():
         signals = await signal_detection_service.get_signal_history(limit=1)
         latest_signal = signals[0] if signals else None
         
+        # Convert latest_signal datetime objects to strings for JSON serialization
+        latest_signal_json = None
+        if latest_signal:
+            latest_signal_json = {
+                "symbol": latest_signal.get("symbol"),
+                "signal_type": latest_signal.get("signal_type"),
+                "confidence": latest_signal.get("confidence"),
+                "session_name": latest_signal.get("session_name"),
+                "timestamp": latest_signal.get("timestamp").isoformat() if latest_signal.get("timestamp") else None
+            }
+        
         return JSONResponse(
             content={
                 "monitoring_active": is_monitoring,
                 "market_hours": is_market_hours,
                 "current_time_ist": current_time.isoformat(),
-                "latest_signal": latest_signal,
+                "latest_signal": latest_signal_json,
                 "service_status": "running" if is_monitoring else "stopped",
                 "timestamp": datetime.utcnow().isoformat()
             },
