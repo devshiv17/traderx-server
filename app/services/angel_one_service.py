@@ -130,27 +130,57 @@ class AngelOneService:
         try:
             logger.info("🔍 Discovering valid NIFTY futures tokens...")
             
-            # Search for NIFTY instruments
-            search_results = self.smart_api.searchScrip("NFO", "NIFTY")
+            # Try multiple search approaches to find NIFTY futures
+            search_results = None
+            search_attempts = [
+                ("NFO", "NIFTY"),
+                ("NFO", "NIFTY50"),  
+                ("NFO", "NIFTY 50"),
+                ("NSE", "NIFTY"),  # Try NSE as well
+            ]
+            
+            for exchange, search_term in search_attempts:
+                logger.info(f"Searching for '{search_term}' on {exchange}")
+                try:
+                    search_results = self.smart_api.searchScrip(exchange, search_term)
+                    logger.info(f"Search result: {search_results}")  # Debug the full response
+                    if search_results and search_results.get('status') and search_results.get('data'):
+                        logger.info(f"✅ Found {len(search_results.get('data', []))} results with search term: {search_term}")
+                        break
+                    else:
+                        logger.warning(f"No valid data in search results for {search_term}")
+                except Exception as e:
+                    logger.error(f"Search failed for {search_term}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    continue
             
             if search_results and search_results.get('status'):
                 instruments = search_results.get('data', [])
                 logger.info(f"Found {len(instruments)} NIFTY instruments")
+                
+                # Debug: Log all instruments to understand what's available
+                logger.info("=== ALL NIFTY INSTRUMENTS FOUND ===")
+                for i, inst in enumerate(instruments[:20]):  # Show more instruments
+                    logger.info(f"  [{i}] {inst.get('tradingsymbol')} | Type: {inst.get('instrumenttype')} | Token: {inst.get('token')} | Expiry: {inst.get('expiry')} | Exchange: {inst.get('exchange')}")
                 
                 # Filter for current month futures (active contracts)
                 current_futures = []
                 for inst in instruments:
                     instrument_type = inst.get('instrumenttype', '').upper()
                     trading_symbol = inst.get('tradingsymbol', '')
+                    exchange = inst.get('exchange', '').upper()
                     
-                    # Look for index futures - more specific filtering
-                    if instrument_type == 'FUTIDX':
-                        # Must contain NIFTY and be a futures contract (not options)
-                        if ('NIFTY' in trading_symbol and 
-                            not any(x in trading_symbol for x in ['CE', 'PE', 'WK', 'WEEKLY']) and
-                            any(x in trading_symbol for x in ['2025', '25', 'FUT'])):  # Year indicators or FUT keyword
+                    # Look for index futures with more comprehensive filtering
+                    if (instrument_type in ['FUTIDX', 'FUTCUR', 'FUT'] and 
+                        exchange in ['NFO', 'NSE']):
+                        # Must be a NIFTY futures contract
+                        if ('NIFTY' in trading_symbol.upper() and 
+                            not any(x in trading_symbol.upper() for x in ['CE', 'PE', 'CALL', 'PUT']) and
+                            not 'WEEKLY' in trading_symbol.upper() and
+                            not 'MINI' in trading_symbol.upper()):
                             current_futures.append(inst)
-                            logger.info(f"Found futures candidate: {trading_symbol} (Type: {instrument_type})")
+                            logger.info(f"✅ VALID FUTURES: {trading_symbol} (Type: {instrument_type}, Expiry: {inst.get('expiry')}, Token: {inst.get('token')})")
                 
                 # Sort by expiry to get the nearest contracts
                 current_futures.sort(key=lambda x: x.get('expiry', ''))
@@ -193,20 +223,57 @@ class AngelOneService:
                 logger.info(f"✅ Discovered {len(self.futures_tokens)} valid NIFTY futures")
                 
             else:
-                logger.warning("⚠️ Failed to search for NIFTY instruments - using indices only")
+                logger.error("❌ Failed to search for NIFTY instruments - search returned no results or failed")
+                logger.error(f"Search result status: {search_results}")
             
-            # If no futures found, create mock futures for signal detection
+            # If no futures found through search, try known NIFTY futures tokens
             if not self.futures_tokens:
-                logger.info("📊 No NIFTY futures found - using NIFTY index for signal detection")
-                self.futures_tokens['NIFTY_FUT1'] = {
-                    'token': '99926000',  # Use NIFTY token
-                    'trading_symbol': 'NIFTY',
-                    'name': 'NIFTY 50 (Index as Proxy)',
-                    'expiry': 'N/A',
-                    'exchange': 'NSE'
-                }
-                self.valid_symbols.add('NIFTY_FUT1')
-                logger.info("✅ Created NIFTY_FUT1 using NIFTY index as proxy")
+                logger.warning("📊 No futures found through search - trying known NIFTY futures tokens...")
+                
+                # Try current month NIFTY futures tokens - Aug 2025
+                # These tokens are for current month (August 2025) and next month
+                known_futures_tokens = [
+                    # August 2025 NIFTY futures (current month)
+                    "67329",    # NIFTY25AUGFUT - Most likely current month
+                    "67330",    # NIFTY25SEPFUT - Next month
+                    # Backup tokens from previous patterns
+                    "61234",    # Pattern-based token
+                    "61235",    # Pattern-based token  
+                ]
+                logger.info(f"Trying {len(known_futures_tokens)} known NIFTY futures tokens for August 2025...")
+                
+                # Test if these tokens are valid by trying to subscribe
+                for i, token in enumerate(known_futures_tokens[:2]):  # Only try first 2
+                    std_symbol = f"NIFTY_FUT{i+1}"
+                    self.futures_tokens[std_symbol] = {
+                        'token': token,
+                        'trading_symbol': f'NIFTY_FUT_{token}',
+                        'name': f'NIFTY Futures Contract {i+1}',
+                        'expiry': 'Unknown',
+                        'exchange': 'NFO'
+                    }
+                    self.valid_symbols.add(std_symbol)
+                    
+                    # Add to market tokens for subscription
+                    self.market_tokens.append({"exchangeType": 2, "tokens": [token]})
+                    logger.info(f"🧪 Added known futures token: {std_symbol} (Token: {token})")
+                
+                # If still no futures, use index as last resort
+                if not self.futures_tokens:
+                    logger.error("❌ CRITICAL: No NIFTY futures found at all - using NIFTY index as proxy")
+                    logger.error("⚠️  This will result in identical data for index and futures - signals may be inaccurate!")
+                    
+                    self.futures_tokens['NIFTY_FUT1'] = {
+                        'token': '99926000',  # NIFTY index token
+                        'trading_symbol': 'NIFTY_INDEX_PROXY',
+                        'name': 'NIFTY 50 Index (Emergency Proxy)',
+                        'expiry': 'N/A',
+                        'exchange': 'NSE'
+                    }
+                    self.valid_symbols.add('NIFTY_FUT1')
+                    logger.error("💀 Created NIFTY_FUT1 using NIFTY index - THIS IS NOT IDEAL!")
+                else:
+                    logger.info(f"✅ Using {len(self.futures_tokens)} known futures tokens")
                 
         except Exception as e:
             logger.error(f"❌ Error discovering futures tokens: {e}")

@@ -722,4 +722,7 @@ async def get_available_symbols():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve available symbols"
-        ) 
+        )
+
+
+ 
