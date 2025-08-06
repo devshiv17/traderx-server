@@ -280,12 +280,23 @@ async def get_monitoring_status():
         signals = await signal_detection_service.get_signal_history(limit=1)
         latest_signal = signals[0] if signals else None
         
+        # Convert latest_signal datetime objects to strings for JSON serialization
+        latest_signal_json = None
+        if latest_signal:
+            latest_signal_json = {
+                "symbol": latest_signal.get("symbol"),
+                "signal_type": latest_signal.get("signal_type"),
+                "confidence": latest_signal.get("confidence"),
+                "session_name": latest_signal.get("session_name"),
+                "timestamp": latest_signal.get("timestamp").isoformat() if latest_signal.get("timestamp") else None
+            }
+        
         return JSONResponse(
             content={
                 "monitoring_active": is_monitoring,
                 "market_hours": is_market_hours,
                 "current_time_ist": current_time.isoformat(),
-                "latest_signal": latest_signal,
+                "latest_signal": latest_signal_json,
                 "service_status": "running" if is_monitoring else "stopped",
                 "timestamp": datetime.utcnow().isoformat()
             },
@@ -340,8 +351,10 @@ async def get_chart_signals(
                 
                 # Convert to IST if needed
                 if signal_dt.tzinfo is None:
-                    signal_dt = pytz.UTC.localize(signal_dt)
-                signal_dt_ist = signal_dt.astimezone(IST)
+                    # Treat naive datetime as IST (not UTC)
+                    signal_dt_ist = IST.localize(signal_dt)
+                else:
+                    signal_dt_ist = signal_dt.astimezone(IST)
                 signal_date = signal_dt_ist.date()
             
             # Check if signal matches our criteria
@@ -420,7 +433,8 @@ async def get_chart_signals(
 @router.get("/signals/breakout-details")
 async def get_signals_with_breakout_details(
     limit: int = Query(50, description="Maximum number of signals to return", ge=1, le=200),
-    session_name: Optional[str] = Query(None, description="Filter by session name")
+    session_name: Optional[str] = Query(None, description="Filter by session name"),
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)")
 ):
     """
     Get signals with detailed breakout information
@@ -428,7 +442,43 @@ async def get_signals_with_breakout_details(
     Shows exact NIFTY and Future breakout conditions instead of just arrows
     """
     try:
-        signals = await signal_detection_service.get_signal_history(limit=limit)
+        import pytz
+        IST = pytz.timezone('Asia/Kolkata')
+        
+        # Parse date - default to today if not provided
+        if not date:
+            target_date = datetime.now(IST).date()
+        else:
+            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        
+        # Get more signals to filter by date
+        all_signals = await signal_detection_service.get_signal_history(limit=limit*4)
+        
+        # Filter signals by date first
+        signals = []
+        for signal in all_signals:
+            signal_date = None
+            
+            # Get signal timestamp and convert to IST
+            if signal.get('timestamp'):
+                if isinstance(signal['timestamp'], str):
+                    signal_dt = datetime.fromisoformat(signal['timestamp'].replace('Z', '+00:00'))
+                else:
+                    signal_dt = signal['timestamp']
+                
+                if signal_dt.tzinfo is None:
+                    # Treat naive datetime as IST (not UTC)
+                    signal_dt_ist = IST.localize(signal_dt)
+                else:
+                    signal_dt_ist = signal_dt.astimezone(IST)
+                signal_date = signal_dt_ist.date()
+            
+            # Include only signals from the target date
+            if signal_date == target_date:
+                signals.append(signal)
+        
+        # Limit the results
+        signals = signals[:limit]
         
         # Filter by session if specified
         if session_name:
@@ -472,10 +522,12 @@ async def get_signals_with_breakout_details(
         
         return JSONResponse(
             content={
+                "date": target_date.isoformat(),
                 "signals": detailed_signals,
                 "count": len(detailed_signals),
                 "total_signals": len(signals),
                 "filters_applied": {
+                    "date": target_date.isoformat(),
                     "session_name": session_name
                 },
                 "legend": {
@@ -544,8 +596,10 @@ async def get_signals_by_session(
                     signal_dt = signal['timestamp']
                 
                 if signal_dt.tzinfo is None:
-                    signal_dt = pytz.UTC.localize(signal_dt)
-                signal_dt_ist = signal_dt.astimezone(IST)
+                    # Treat naive datetime as IST (not UTC)
+                    signal_dt_ist = IST.localize(signal_dt)
+                else:
+                    signal_dt_ist = signal_dt.astimezone(IST)
                 signal_date = signal_dt_ist.date()
             
             # Filter by date if specified
@@ -554,11 +608,15 @@ async def get_signals_by_session(
                 
                 # Clean up the signal data for JSON serialization
                 clean_signal = dict(signal)
-                if 'timestamp' in clean_signal and clean_signal['timestamp']:
-                    if hasattr(clean_signal['timestamp'], 'isoformat'):
-                        clean_signal['timestamp'] = clean_signal['timestamp'].isoformat()
-                    else:
-                        clean_signal['timestamp'] = str(clean_signal['timestamp'])
+                
+                # Convert all datetime fields to strings
+                datetime_fields = ['timestamp', 'created_at', 'updated_at']
+                for field in datetime_fields:
+                    if field in clean_signal and clean_signal[field]:
+                        if hasattr(clean_signal[field], 'isoformat'):
+                            clean_signal[field] = clean_signal[field].isoformat()
+                        else:
+                            clean_signal[field] = str(clean_signal[field])
                 
                 # Add to appropriate session
                 if session_name in sessions:

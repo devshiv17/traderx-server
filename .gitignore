@@ -133,4 +133,4 @@ logs/
 *.xlsx
 *.xls
 .claude
-ANGEL_ONE_INTEGRATION.md
+ANGEL_ONE_INTEGRATION.md.server_pid

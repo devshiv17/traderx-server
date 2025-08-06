@@ -148,7 +148,7 @@ class TickDataService:
             tick_doc = {
                 'symbol': symbol,
                 'price': price,
-                'timestamp': timestamp,  # Market timestamp from Angel One
+                'timestamp': now,  # Market timestamp
                 'token': tick_data.get('token', ''),
                 'exchange': tick_data.get('exchange', 'NSE'),
                 'high': float(tick_data.get('high', 0)) if tick_data.get('high') else None,
@@ -394,24 +394,40 @@ class TickDataService:
         try:
             collection = self._get_collection()
             
-            # Convert IST time range to UTC for database query
-            # Database stores timezone-naive timestamps that are actually in UTC
+            # Database stores UTC timestamps as naive datetime
+            # If incoming time is naive, assume it's IST and convert to UTC for DB query
             if start_time.tzinfo is None:
-                start_time_utc = pytz.UTC.localize(start_time)
+                # Treat naive datetime as IST and convert to UTC
+                ist_tz = pytz.timezone('Asia/Kolkata')
+                start_time_ist = ist_tz.localize(start_time)
+                start_time_utc = start_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
             else:
-                start_time_utc = start_time.astimezone(pytz.UTC)
+                start_time_utc = start_time.astimezone(pytz.UTC).replace(tzinfo=None)
             
             if end_time.tzinfo is None:
-                end_time_utc = pytz.UTC.localize(end_time)
+                # Treat naive datetime as IST and convert to UTC  
+                ist_tz = pytz.timezone('Asia/Kolkata')
+                end_time_ist = ist_tz.localize(end_time)
+                end_time_utc = end_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
             else:
-                end_time_utc = end_time.astimezone(pytz.UTC)
+                end_time_utc = end_time.astimezone(pytz.UTC).replace(tzinfo=None)
             
             query = {
                 'symbol': symbol.upper(),
-                'received_at': {
-                    '$gte': start_time_utc,
-                    '$lte': end_time_utc
-                }
+                '$or': [
+                    {
+                        'received_at': {
+                            '$gte': start_time_utc,
+                            '$lte': end_time_utc
+                        }
+                    },
+                    {
+                        'timestamp': {
+                            '$gte': start_time_utc,
+                            '$lte': end_time_utc
+                        }
+                    }
+                ]
             }
             
             cursor = collection.find(query).sort('received_at', 1)
