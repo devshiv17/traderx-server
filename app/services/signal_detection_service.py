@@ -8,7 +8,6 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import pytz
-import numpy as np
 from collections import defaultdict, deque
 
 from ..core.database import get_collection
@@ -59,6 +58,9 @@ class SignalDetectionService:
         self.active_signals = {}
         self.signal_history = []
         
+        # Session state tracking - each session can have one active signal
+        self.session_signals = {}  # Format: {"Morning Opening": {"signal_type": "BUY_PUT", "timestamp": datetime, "active": True}}
+        
         # Technical indicators data
         self.price_data = defaultdict(lambda: deque(maxlen=100))  # Last 100 5-min candles
         self.volume_data = defaultdict(lambda: deque(maxlen=100))
@@ -77,6 +79,11 @@ class SignalDetectionService:
         """Start real-time signal monitoring"""
         logger.info("🚀 Starting advanced signal detection service...")
         self.monitoring_active = True
+        
+        # Reset session signal tracking for new day
+        today = datetime.now(IST).strftime('%Y-%m-%d')
+        self.session_signals = {}
+        logger.info(f"📅 Reset session signal tracking for {today}")
         
         # Load existing active signals from database
         await self._load_active_signals_from_db()
@@ -117,12 +124,20 @@ class SignalDetectionService:
                     'nifty_price': signal_doc.get('nifty_price'),
                     'future_price': signal_doc.get('future_price'),
                     'future_symbol': signal_doc.get('future_symbol'),
+                    'entry_price': signal_doc.get('entry_price'),
+                    'stop_loss': signal_doc.get('stop_loss'),
+                    'target_1': signal_doc.get('target_1'),
+                    'target_2': signal_doc.get('target_2'),
                     'confidence': signal_doc.get('confidence'),
                     'status': signal_doc.get('status'),
                     'session_high': signal_doc.get('session_high'),
                     'session_low': signal_doc.get('session_low'),
+                    'future_session_high': signal_doc.get('future_session_high'),
+                    'future_session_low': signal_doc.get('future_session_low'),
                     'vwap_nifty': signal_doc.get('vwap_nifty'),
                     'vwap_future': signal_doc.get('vwap_future'),
+                    'breakout_details': signal_doc.get('breakout_details'),
+                    'display_text': signal_doc.get('display_text'),
                     'breakout_type': signal_doc.get('breakout_type'),
                     'volume_confirmation': signal_doc.get('volume_confirmation'),
                     'technical_data': signal_doc.get('technical_data', {})
@@ -130,8 +145,22 @@ class SignalDetectionService:
                 
                 self.active_signals[signal_id] = signal_data
                 self.signal_history.append(signal_data)
+                
+                # Track existing active signals per session with new key format
+                session_name = signal_doc.get('session_name')
+                signal_type = signal_doc.get('signal_type')
+                if session_name and signal_type and signal_doc.get('status') == 'ACTIVE':
+                    session_key = f"{session_name}_{signal_type}"
+                    self.session_signals[session_key] = {
+                        'signal_type': signal_type,
+                        'timestamp': signal_doc.get('timestamp'),
+                        'active': True,
+                        'signal_id': signal_id,
+                        'session_name': session_name
+                    }
             
             logger.info(f"✅ Loaded {len(signals)} active signals from database")
+            logger.info(f"📋 Tracking {len(self.session_signals)} active session signals")
             
         except Exception as e:
             logger.error(f"Error loading active signals from database: {e}")
@@ -174,6 +203,7 @@ class SignalDetectionService:
         """Process sessions that may have already passed today"""
         try:
             current_time = datetime.now(IST)
+            logger.info(f"🕐 Current time: {current_time.strftime('%H:%M:%S')}")
             
             for session in self.sessions:
                 session_start_time = datetime.strptime(session.start_time, "%H:%M").replace(
@@ -183,35 +213,50 @@ class SignalDetectionService:
                     year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=IST
                 )
                 
+                logger.info(f"📅 Session {session.name}: {session_start_time.strftime('%H:%M')} - {session_end_time.strftime('%H:%M')}, Completed: {session.is_completed}")
+                
                 # If session has ended but wasn't processed, process it now
                 if current_time > session_end_time and not session.is_completed:
-                    logger.info(f"Processing historical session: {session.name}")
+                    logger.info(f"🔄 Processing historical session: {session.name}")
                     await self._process_session_retroactively(session, session_start_time, session_end_time)
                     session.is_completed = True
+                    logger.info(f"✅ Historical session {session.name} processing complete")
+                elif current_time <= session_end_time:
+                    logger.info(f"⏳ Session {session.name} not yet ended")
+                else:
+                    logger.info(f"✅ Session {session.name} already processed")
                     
         except Exception as e:
             logger.error(f"Error processing historical sessions: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
     
     async def _process_session_retroactively(self, session: TradingSession, start_time: datetime, end_time: datetime):
         """Process a session retroactively using historical data"""
         try:
+            logger.info(f"📊 Processing session {session.name} from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')}")
             symbols = [self.nifty_index] + self.nifty_futures
             
             for symbol in symbols:
                 if symbol not in session.session_data:
                     session.session_data[symbol] = {'high': None, 'low': None, 'candles': []}
                 
+                candle_count = 0
                 # Get all candles for this session period
                 current_candle_start = start_time
                 while current_candle_start < end_time:
                     candle_end = current_candle_start + timedelta(minutes=5)
+                    
+                    logger.debug(f"🔍 Getting candle data for {symbol}: {current_candle_start.strftime('%H:%M')} - {candle_end.strftime('%H:%M')}")
                     
                     candle_data = await self._get_5min_candle_data(symbol, 
                         current_candle_start.replace(tzinfo=None), 
                         candle_end.replace(tzinfo=None))
                     
                     if candle_data:
+                        candle_count += 1
                         session.session_data[symbol]['candles'].append(candle_data)
+                        logger.debug(f"📈 Found candle for {symbol}: O={candle_data['open']:.2f}, H={candle_data['high']:.2f}, L={candle_data['low']:.2f}, C={candle_data['close']:.2f}")
                         
                         # Update session high/low
                         if session.session_data[symbol]['high'] is None:
@@ -224,17 +269,23 @@ class SignalDetectionService:
                             session.session_data[symbol]['low'] = min(
                                 session.session_data[symbol]['low'], candle_data['low']
                             )
+                    else:
+                        logger.debug(f"❌ No candle data found for {symbol} at {current_candle_start.strftime('%H:%M')}")
                     
                     current_candle_start = candle_end
+                
+                logger.info(f"📊 {symbol}: Found {candle_count} candles, High: {session.session_data[symbol]['high']}, Low: {session.session_data[symbol]['low']}")
                     
                 # Add data to main tracking
                 if symbol in session.session_data and session.session_data[symbol]['candles']:
                     self.price_data[symbol].extend(session.session_data[symbol]['candles'])
                     
-            logger.info(f"Processed {session.name}: NIFTY high/low: {session.session_data.get(self.nifty_index, {}).get('high')}/{session.session_data.get(self.nifty_index, {}).get('low')}")
+            logger.info(f"✅ Processed {session.name}: NIFTY high/low: {session.session_data.get(self.nifty_index, {}).get('high')}/{session.session_data.get(self.nifty_index, {}).get('low')}")
             
         except Exception as e:
             logger.error(f"Error processing session retroactively: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
     
     def _is_market_hours(self, current_time: datetime) -> bool:
         """Check if current time is within market hours"""
@@ -514,7 +565,7 @@ class SignalDetectionService:
             if symbol not in self.price_data or len(self.price_data[symbol]) < 5:
                 return None
             
-            # Get today's data starting from 9:15 AM (naive datetime)
+            # Get today's data starting from 9:15 AM (IST)
             today_start = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0, tzinfo=None)
             
             total_volume = 0
@@ -593,16 +644,44 @@ class SignalDetectionService:
     ):
         """Generate and store trading signal"""
         try:
-            # Create unique signal ID
-            signal_id = f"{session.name}_{signal_type}_{timestamp.strftime('%H%M%S')}"
+            # Strict duplicate prevention logic
+            # Only ONE signal per session per signal type (BUY_CALL or BUY_PUT)
             
-            # Avoid duplicate signals for same session
-            if signal_id in self.active_signals:
+            # Check in-memory signals first for quick detection
+            duplicate_found = False
+            for signal_id, signal in self.active_signals.items():
+                if (signal.get('session_name') == session.name and 
+                    signal.get('signal_type') == signal_type):
+                    logger.debug(f"⏭️ {signal_type} signal already exists for session {session.name}")
+                    duplicate_found = True
+                    break
+            
+            if duplicate_found:
                 return
+                
+            # Also check database for any existing signals (not just active)
+            # In breakout strategy, there should be only ONE signal per session per type
+            signals_collection = get_collection('signals')
+            existing_signal = await signals_collection.find_one({
+                'session_name': session.name,
+                'signal_type': signal_type
+            })
+            
+            if existing_signal:
+                logger.debug(f"⏭️ Active {signal_type} signal already exists in database for session {session.name}")
+                return
+            
+            # Create unique signal ID for this specific signal with microseconds for uniqueness
+            signal_id = f"{session.name}_{signal_type}_{timestamp.strftime('%H%M%S')}_{timestamp.microsecond}"
             
             # Calculate confidence based on technical factors
             confidence = await self._calculate_signal_confidence(
                 self.nifty_index, future_symbol, signal_type
+            )
+            
+            # Calculate stop loss and targets based on session high/low
+            stop_loss, target_1, target_2 = self._calculate_stop_loss_and_targets(
+                signal_type, nifty_session_high, nifty_session_low, nifty_price
             )
             
             # Get detailed breakout information for clear display
@@ -648,6 +727,10 @@ class SignalDetectionService:
                 'nifty_price': nifty_price,
                 'future_price': future_price,
                 'future_symbol': future_symbol,
+                'entry_price': nifty_price,  # Use NIFTY price as entry price
+                'stop_loss': stop_loss,
+                'target_1': target_1,
+                'target_2': target_2,
                 'confidence': confidence,
                 'status': 'ACTIVE',
                 'session_high': nifty_session_high,
@@ -660,6 +743,16 @@ class SignalDetectionService:
                 'display_text': self._create_signal_display_text(signal_type, breakout_status, session.name)
             }
             
+            # Track this signal for the session - allowing multiple different breakouts
+            session_key = f"{session.name}_{signal_type}"  # Allow different signal types
+            self.session_signals[session_key] = {
+                'signal_type': signal_type,
+                'timestamp': timestamp,
+                'active': True,
+                'signal_id': signal_id,
+                'session_name': session.name
+            }
+            
             # Store signal
             self.active_signals[signal_id] = signal_data
             self.signal_history.append(signal_data)
@@ -670,11 +763,42 @@ class SignalDetectionService:
             # Broadcast signal via WebSocket
             await self._broadcast_signal(signal_data)
             
-            logger.info(f"🚨 SIGNAL GENERATED: {signal_type} | {reason} | Confidence: {confidence}%")
+            logger.info(f"🚨 SIGNAL GENERATED: {signal_type} | {reason} | Confidence: {confidence}% | Session: {session.name}")
+            logger.info(f"   Entry: ₹{nifty_price:.2f} | Stop Loss: ₹{stop_loss:.2f} | Target1: +₹{target_1:.2f} | Target2: +₹{target_2:.2f}")
             logger.info(f"   NIFTY: ₹{nifty_price:.2f} | {future_symbol}: ₹{future_price:.2f}")
             
         except Exception as e:
             logger.error(f"Error generating signal: {e}")
+    
+    async def _deactivate_signal(self, signal_id: str):
+        """Deactivate an existing signal"""
+        try:
+            # Remove from active signals
+            signal_data = None
+            if signal_id in self.active_signals:
+                signal_data = self.active_signals[signal_id]
+                del self.active_signals[signal_id]
+            
+            # Remove from session tracking
+            if signal_data:
+                session_name = signal_data.get('session_name')
+                signal_type = signal_data.get('signal_type')
+                if session_name and signal_type:
+                    session_key = f"{session_name}_{signal_type}"
+                    if session_key in self.session_signals:
+                        del self.session_signals[session_key]
+            
+            # Update database status
+            collection = get_collection('signals')
+            await collection.update_one(
+                {'id': signal_id},
+                {'$set': {'status': 'REPLACED', 'updated_at': datetime.now(IST).replace(tzinfo=None)}}
+            )
+            
+            logger.info(f"🔄 Deactivated signal: {signal_id}")
+            
+        except Exception as e:
+            logger.error(f"Error deactivating signal {signal_id}: {e}")
     
     def _create_signal_display_text(self, signal_type: str, breakout_status: Dict, session_name: str) -> str:
         """Create clear display text showing exact breakout conditions"""
@@ -744,17 +868,77 @@ class SignalDetectionService:
             logger.error(f"Error calculating confidence: {e}")
             return 50
     
+    def _calculate_stop_loss_and_targets(self, signal_type: str, session_high: float, session_low: float, entry_price: float) -> tuple:
+        """
+        Calculate stop loss and targets based on trading rules:
+        - Target 1: (Session High - Session Low) / 2
+        - Target 2: (Session High - Session Low)  
+        - Stop Loss PE: Session High + 5 points
+        - Stop Loss CE: Session Low - 5 points
+        """
+        try:
+            if not session_high or not session_low or not entry_price:
+                logger.warning("Missing session data for stop loss/target calculation")
+                return None, None, None
+            
+            # Calculate session range
+            session_range = session_high - session_low
+            
+            # Calculate targets and stop loss based on signal direction
+            target_1_amount = round(session_range / 2, 2)
+            target_2_amount = round(session_range, 2)
+            
+            if signal_type in ["BUY_PUT"]:  # PE orders - expecting price to go down
+                # Targets are below entry price (subtract from entry)
+                target_1 = round(entry_price - target_1_amount, 2)
+                target_2 = round(entry_price - target_2_amount, 2)
+                # Stop loss is session high (breakout candle high)
+                stop_loss = round(session_high, 2)
+                
+            elif signal_type in ["BUY_CALL"]:  # CE orders - expecting price to go up
+                # Targets are above entry price (add to entry)
+                target_1 = round(entry_price + target_1_amount, 2)
+                target_2 = round(entry_price + target_2_amount, 2)
+                # Stop loss is session low (breakout candle low)
+                stop_loss = round(session_low, 2)
+            else:
+                # Default fallback
+                stop_loss = round(entry_price * 0.98, 2)  # 2% stop loss as fallback
+            
+            logger.debug(f"📊 Calculated - Target1: {target_1}, Target2: {target_2}, StopLoss: {stop_loss}")
+            
+            return stop_loss, target_1, target_2
+            
+        except Exception as e:
+            logger.error(f"Error calculating stop loss and targets: {e}")
+            return None, None, None
+    
     async def _save_signal_to_db(self, signal_data: Dict):
-        """Save signal to database"""
+        """Save signal to database with duplicate prevention"""
         try:
             signals_collection = get_collection('signals')
-            await signals_collection.insert_one({
+            
+            # Prepare document for insertion
+            signal_doc = {
                 **signal_data,
                 'created_at': datetime.now(IST).replace(tzinfo=None),
                 'updated_at': datetime.now(IST).replace(tzinfo=None)
-            })
+            }
+            
+            # Try to insert the signal
+            await signals_collection.insert_one(signal_doc)
+            logger.info(f"✅ Signal saved to database: {signal_data.get('id')}")
+            
         except Exception as e:
-            logger.error(f"Error saving signal to database: {e}")
+            # Check if it's a duplicate key error
+            if "duplicate key error" in str(e).lower() or "E11000" in str(e):
+                logger.warning(f"⚠️ Duplicate signal prevented: {signal_data.get('id')} - {e}")
+                # This is expected behavior for duplicate prevention
+                return
+            else:
+                # Unexpected error, log and raise
+                logger.error(f"❌ Unexpected error saving signal to database: {e}")
+                raise e
     
     async def _broadcast_signal(self, signal_data: Dict):
         """Broadcast signal via WebSocket"""
@@ -764,6 +948,54 @@ class SignalDetectionService:
         except Exception as e:
             logger.error(f"Error broadcasting signal: {e}")
     
+    async def _cleanup_old_signals(self, current_time: datetime):
+        """Clean up old signals that are no longer relevant"""
+        try:
+            # Remove signals older than 4 hours from in-memory storage
+            cutoff_time = current_time - timedelta(hours=4)
+            
+            # Clean up active signals
+            expired_signal_ids = []
+            for signal_id, signal in self.active_signals.items():
+                if (signal.get('timestamp') and 
+                    signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    expired_signal_ids.append(signal_id)
+            
+            for signal_id in expired_signal_ids:
+                del self.active_signals[signal_id]
+                logger.debug(f"🧹 Removed old signal from memory: {signal_id}")
+            
+            # Clean up session signals tracking
+            expired_session_keys = []
+            for session_key, session_signal in self.session_signals.items():
+                if (session_signal.get('timestamp') and 
+                    session_signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    expired_session_keys.append(session_key)
+            
+            for session_key in expired_session_keys:
+                del self.session_signals[session_key]
+                logger.debug(f"🧹 Removed old session signal tracking: {session_key}")
+                
+            # Update database status for old active signals (mark as expired)
+            if expired_signal_ids:
+                signals_collection = get_collection('signals')
+                await signals_collection.update_many(
+                    {
+                        'id': {'$in': expired_signal_ids},
+                        'status': 'ACTIVE'
+                    },
+                    {
+                        '$set': {
+                            'status': 'EXPIRED',
+                            'updated_at': datetime.now(IST).replace(tzinfo=None)
+                        }
+                    }
+                )
+                logger.info(f"🧹 Marked {len(expired_signal_ids)} old signals as EXPIRED in database")
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up old signals: {e}")
+
     async def _update_technical_indicators(self, current_time: datetime):
         """Update technical indicators and cache"""
         try:
@@ -774,6 +1006,10 @@ class SignalDetectionService:
                 vwap = await self._calculate_vwap(symbol)
                 if vwap:
                     self.vwap_data[symbol][current_time.strftime('%H:%M')] = vwap
+            
+            # Clean up old signals every 30 minutes
+            if current_time.minute % 30 == 0 and current_time.second < 15:
+                await self._cleanup_old_signals(current_time)
             
         except Exception as e:
             logger.error(f"Error updating technical indicators: {e}")
@@ -802,10 +1038,16 @@ class SignalDetectionService:
                     'nifty_price': signal_doc.get('nifty_price'),
                     'future_price': signal_doc.get('future_price'),
                     'future_symbol': signal_doc.get('future_symbol'),
+                    'entry_price': signal_doc.get('entry_price'),
+                    'stop_loss': signal_doc.get('stop_loss'),
+                    'target_1': signal_doc.get('target_1'),
+                    'target_2': signal_doc.get('target_2'),
                     'confidence': signal_doc.get('confidence'),
                     'status': signal_doc.get('status'),
                     'session_high': signal_doc.get('session_high'),
                     'session_low': signal_doc.get('session_low'),
+                    'future_session_high': signal_doc.get('future_session_high'),
+                    'future_session_low': signal_doc.get('future_session_low'),
                     'vwap_nifty': signal_doc.get('vwap_nifty'),
                     'vwap_future': signal_doc.get('vwap_future'),
                     'breakout_details': signal_doc.get('breakout_details'),
@@ -817,7 +1059,7 @@ class SignalDetectionService:
             # Combine with in-memory signals (avoid duplicates)
             all_signals = list(db_signals)
             for mem_signal in self.signal_history:
-                if not any(s.get('id') == mem_signal.get('id') for s in all_signals):
+                if mem_signal is not None and not any(s.get('id') == mem_signal.get('id') for s in all_signals):
                     all_signals.append(mem_signal)
             
             # Sort by timestamp and limit
@@ -849,13 +1091,45 @@ class SignalDetectionService:
     
     async def get_technical_data(self, symbol: str) -> Dict:
         """Get technical analysis data for symbol"""
-        return {
-            'symbol': symbol,
-            'current_price': await self._get_current_price(symbol),
-            'vwap': await self._calculate_vwap(symbol),
-            'recent_candles': list(self.price_data[symbol])[-10:] if symbol in self.price_data else [],
-            'volume_data': list(self.volume_data[symbol])[-10:] if symbol in self.volume_data else []
-        }
+        try:
+            current_price = await self._get_current_price(symbol)
+            vwap = await self._calculate_vwap(symbol)
+            
+            # Convert datetime objects to strings for JSON serialization
+            recent_candles = []
+            if symbol in self.price_data:
+                for candle in list(self.price_data[symbol])[-10:]:
+                    candle_dict = dict(candle) if isinstance(candle, dict) else candle
+                    if 'timestamp' in candle_dict and hasattr(candle_dict['timestamp'], 'isoformat'):
+                        candle_dict['timestamp'] = candle_dict['timestamp'].isoformat()
+                    recent_candles.append(candle_dict)
+            
+            volume_data = []
+            if symbol in self.volume_data:
+                for vol_data in list(self.volume_data[symbol])[-10:]:
+                    vol_dict = dict(vol_data) if isinstance(vol_data, dict) else vol_data
+                    if isinstance(vol_dict, dict) and 'timestamp' in vol_dict and hasattr(vol_dict['timestamp'], 'isoformat'):
+                        vol_dict['timestamp'] = vol_dict['timestamp'].isoformat()
+                    volume_data.append(vol_dict)
+            
+            return {
+                'symbol': symbol,
+                'current_price': current_price,
+                'vwap': vwap,
+                'recent_candles': recent_candles,
+                'volume_data': volume_data
+            }
+        except Exception as e:
+            logger.error(f"Error in get_technical_data for {symbol}: {e}")
+            # Return basic data structure on error
+            return {
+                'symbol': symbol,
+                'current_price': None,
+                'vwap': None,
+                'recent_candles': [],
+                'volume_data': [],
+                'error': str(e)
+            }
 
 
 # Create service instance

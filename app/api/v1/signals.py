@@ -237,7 +237,27 @@ async def get_technical_analysis(symbol: str):
     Returns VWAP, price data, volume analysis, and other technical indicators
     """
     try:
+        logger.info(f"Getting technical analysis for {symbol}")
+        
+        # Check if service is available
+        if not signal_detection_service:
+            return JSONResponse(
+                content={
+                    "error": "Signal detection service not available",
+                    "technical_data": {
+                        "symbol": symbol,
+                        "current_price": None,
+                        "vwap": None,
+                        "recent_candles": [],
+                        "volume_data": []
+                    },
+                    "timestamp": datetime.utcnow().isoformat()
+                },
+                status_code=status.HTTP_200_OK
+            )
+        
         technical_data = await signal_detection_service.get_technical_data(symbol)
+        logger.info(f"Technical data retrieved: {technical_data}")
         
         return JSONResponse(
             content={
@@ -249,9 +269,24 @@ async def get_technical_analysis(symbol: str):
         
     except Exception as e:
         logger.error(f"Error getting technical analysis for {symbol}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve technical analysis for {symbol}"
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        
+        # Return error details in response for debugging
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "technical_data": {
+                    "symbol": symbol,
+                    "current_price": None,
+                    "vwap": None,
+                    "recent_candles": [],
+                    "volume_data": []
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            },
+            status_code=status.HTTP_200_OK
         )
 
 
@@ -457,6 +492,10 @@ async def get_signals_with_breakout_details(
         # Filter signals by date first
         signals = []
         for signal in all_signals:
+            # Skip None signals
+            if signal is None:
+                continue
+                
             signal_date = None
             
             # Get signal timestamp and convert to IST
@@ -482,31 +521,47 @@ async def get_signals_with_breakout_details(
         
         # Filter by session if specified
         if session_name:
-            signals = [s for s in signals if s.get('session_name') == session_name]
+            signals = [s for s in signals if s is not None and isinstance(s, dict) and s.get('session_name') == session_name]
+        
+        # Clean up any None values that might have slipped through
+        signals = [s for s in signals if s is not None and isinstance(s, dict)]
         
         # Enhanced signal display with breakout details
         detailed_signals = []
         
         for signal in signals:
+            # Skip None or invalid signals
+            if signal is None or not isinstance(signal, dict):
+                continue
             # Clean up the signal data for JSON serialization
             enhanced_signal = dict(signal)
-            if 'timestamp' in enhanced_signal and enhanced_signal['timestamp']:
-                if hasattr(enhanced_signal['timestamp'], 'isoformat'):
-                    enhanced_signal['timestamp'] = enhanced_signal['timestamp'].isoformat()
-                else:
-                    enhanced_signal['timestamp'] = str(enhanced_signal['timestamp'])
             
-            # Add breakout visualization data
-            breakout_details = enhanced_signal.get('breakout_details', {})
+            # Convert all datetime fields to strings
+            datetime_fields = ['timestamp', 'created_at', 'updated_at']
+            for field in datetime_fields:
+                if field in enhanced_signal and enhanced_signal[field]:
+                    if hasattr(enhanced_signal[field], 'isoformat'):
+                        enhanced_signal[field] = enhanced_signal[field].isoformat()
+                    else:
+                        enhanced_signal[field] = str(enhanced_signal[field])
+            
+            # Add breakout visualization data - handle None values safely
+            breakout_details = enhanced_signal.get('breakout_details') or {}
             display_text = enhanced_signal.get('display_text', '')
+            
+            # Safely get breakout status
+            nifty_breaks_high = breakout_details.get('nifty_breaks_high', False) if isinstance(breakout_details, dict) else False
+            nifty_breaks_low = breakout_details.get('nifty_breaks_low', False) if isinstance(breakout_details, dict) else False
+            future_breaks_high = breakout_details.get('future_breaks_high', False) if isinstance(breakout_details, dict) else False
+            future_breaks_low = breakout_details.get('future_breaks_low', False) if isinstance(breakout_details, dict) else False
             
             # Create summary for display
             enhanced_signal['breakout_summary'] = {
                 'display_text': display_text,
-                'nifty_status': 'BROKE HIGH' if breakout_details.get('nifty_breaks_high') else 'BROKE LOW' if breakout_details.get('nifty_breaks_low') else 'HELD',
-                'future_status': 'BROKE HIGH' if breakout_details.get('future_breaks_high') else 'BROKE LOW' if breakout_details.get('future_breaks_low') else 'HELD',
-                'breakout_type': 'BULLISH' if enhanced_signal.get('signal_type') == 'BUY_CALL' and breakout_details.get('nifty_breaks_high') and breakout_details.get('future_breaks_high') else
-                               'BEARISH' if enhanced_signal.get('signal_type') == 'BUY_PUT' and breakout_details.get('nifty_breaks_low') and breakout_details.get('future_breaks_low') else
+                'nifty_status': 'BROKE HIGH' if nifty_breaks_high else 'BROKE LOW' if nifty_breaks_low else 'HELD',
+                'future_status': 'BROKE HIGH' if future_breaks_high else 'BROKE LOW' if future_breaks_low else 'HELD',
+                'breakout_type': 'BULLISH' if enhanced_signal.get('signal_type') == 'BUY_CALL' and nifty_breaks_high and future_breaks_high else
+                               'BEARISH' if enhanced_signal.get('signal_type') == 'BUY_PUT' and nifty_breaks_low and future_breaks_low else
                                'DIVERGENT',
                 'levels': {
                     'nifty_session_high': enhanced_signal.get('session_high'),
@@ -548,9 +603,11 @@ async def get_signals_with_breakout_details(
         
     except Exception as e:
         logger.error(f"Error getting signals with breakout details: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve signals with breakout details"
+            detail=f"Failed to retrieve signals with breakout details: {str(e)}"
         )
 
 

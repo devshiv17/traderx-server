@@ -92,6 +92,24 @@ async def initialize_database():
         await signals_collection.create_index([("created_at", -1)])
         await signals_collection.create_index([("user_id", 1), ("status", 1)])  # Compound index
         await signals_collection.create_index([("symbol", 1), ("created_at", -1)])  # Compound index
+        
+        # Create unique index to prevent duplicate signals within same session and signal type
+        # This allows multiple breakouts per session but prevents exact duplicates
+        try:
+            await signals_collection.create_index([
+                ("session_name", 1),
+                ("signal_type", 1),
+                ("timestamp", 1)
+            ], unique=True, background=True)
+            logger.info("✅ Signals unique constraint created: session_name + signal_type + timestamp")
+        except Exception as e:
+            # If index already exists or there are duplicate records, log and continue
+            logger.warning(f"⚠️ Could not create unique index for signals: {e}")
+            
+        # Additional index for better query performance
+        await signals_collection.create_index([("session_name", 1), ("status", 1)])
+        await signals_collection.create_index("id", unique=True)  # Ensure signal IDs are unique
+        
         logger.info("✅ Signals collection indexes created")
         
         logger.info("✅ Database initialization completed successfully")
