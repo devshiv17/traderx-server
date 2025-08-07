@@ -29,7 +29,9 @@ class SignalModel(BaseModel):
     option_type: Optional[str] = Field(default=None, pattern="^(PE|CE)$")  # PE or CE
     signal_type: str = Field(...)  # Now supports BUY_CALL, BUY_PUT, etc.
     entry_price: float = Field(..., gt=0)
-    target_price: Optional[float] = Field(default=None, gt=0)
+    target_price: Optional[float] = Field(default=None, gt=0)  # Deprecated - use target_1
+    target_1: Optional[float] = Field(default=None, gt=0)  # First target
+    target_2: Optional[float] = Field(default=None, gt=0)  # Second target
     stop_loss: Optional[float] = Field(default=None, gt=0)
     quantity: int = Field(default=1, gt=0)
     confidence: int = Field(..., ge=0, le=100)
@@ -65,14 +67,16 @@ class SignalModel(BaseModel):
                 "user_id": "507f1f77bcf86cd799439011",
                 "symbol": "NIFTY",
                 "option_type": "CE",
-                "signal_type": "BUY",
+                "signal_type": "BUY_CALL",
                 "entry_price": 22450.0,
-                "target_price": 22550.0,
-                "stop_loss": 22350.0,
+                "target_1": 25.50,
+                "target_2": 51.00,
+                "stop_loss": 22355.0,
                 "quantity": 1,
                 "confidence": 85,
                 "status": "ACTIVE",
-                "notes": "Strong bullish momentum with RSI oversold"
+                "session_name": "Morning Opening",
+                "notes": "Bullish breakout - Both NIFTY and Futures crossed session high"
             }
         }
 

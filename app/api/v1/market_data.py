@@ -633,6 +633,71 @@ async def cleanup_old_tick_data(
         )
 
 
+@router.get("/market/overview")
+async def get_market_overview():
+    """
+    Get market overview with key indices and summary data
+    
+    Returns current market status, key indices, and trading summary.
+    """
+    try:
+        from ...services.tick_data_service import tick_data_service
+        
+        # Get current IST time
+        now_ist = datetime.now(IST)
+        today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Key indices to track
+        key_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+        overview_data = {
+            "timestamp": now_ist.isoformat(),
+            "market_status": "open" if 9 <= now_ist.hour <= 15 else "closed",
+            "indices": [],
+            "summary": {
+                "total_symbols": 0,
+                "active_symbols": 0,
+                "last_update": None
+            }
+        }
+        
+        # Get latest data for key indices
+        for symbol in key_indices:
+            try:
+                latest_ticks = await tick_data_service.get_latest_ticks(symbol=symbol, limit=1)
+                if latest_ticks:
+                    tick = latest_ticks[0]
+                    overview_data["indices"].append({
+                        "symbol": symbol,
+                        "price": tick.get("price", 0),
+                        "timestamp": tick.get("timestamp", ""),
+                        "exchange": tick.get("exchange", "NSE")
+                    })
+                    if not overview_data["summary"]["last_update"]:
+                        overview_data["summary"]["last_update"] = tick.get("timestamp", "")
+            except Exception as e:
+                logger.warning(f"Error getting data for {symbol}: {e}")
+        
+        # Get symbol count from tick data
+        tick_collection = tick_data_service._get_collection()
+        total_symbols = await tick_collection.distinct("symbol", {
+            "timestamp": {"$gte": today_start}
+        })
+        overview_data["summary"]["total_symbols"] = len(total_symbols)
+        overview_data["summary"]["active_symbols"] = len(overview_data["indices"])
+        
+        return JSONResponse(
+            content=overview_data,
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Error retrieving market overview: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve market overview"
+        )
+
+
 @router.get("/available-symbols")
 async def get_available_symbols():
     """

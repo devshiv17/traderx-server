@@ -3,6 +3,7 @@ from .auth import router as auth_router
 from .feed import router as feed_router
 from .market_data import router as market_data_router
 from .signals import router as signals_router
+from .user import router as user_router
 
 api_router = APIRouter()
 
@@ -16,4 +17,7 @@ api_router.include_router(feed_router, tags=["market feed"])
 api_router.include_router(market_data_router, tags=["market data"])
 
 # Include signals routes
-api_router.include_router(signals_router, tags=["trading signals"]) 
+api_router.include_router(signals_router, tags=["trading signals"])
+
+# Include user routes
+api_router.include_router(user_router, tags=["user"]) 
