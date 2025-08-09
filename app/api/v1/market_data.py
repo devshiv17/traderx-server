@@ -9,6 +9,7 @@ import pytz
 from ...services.market_data_service import market_data_service
 from ...models.market_data import MarketDataModel, MarketDataFilter, MarketDataResponse
 from ...core.database import get_collection
+from ...core.symbols import SymbolsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -647,8 +648,8 @@ async def get_market_overview():
         now_ist = datetime.now(IST)
         today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # Key indices to track
-        key_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+        # Key indices to track - using central symbols configuration
+        key_indices = SymbolsConfig.get_symbol_names()
         overview_data = {
             "timestamp": now_ist.isoformat(),
             "market_status": "open" if 9 <= now_ist.hour <= 15 else "closed",
@@ -752,19 +753,8 @@ async def get_available_symbols():
         
         logger.info(f"📊 Found symbols for today ({today_start.strftime('%Y-%m-%d')}) - Tick data: {len(tick_symbols)}, Market data: {len(market_symbols)}, Total unique: {len(all_symbols)}")
         
-        # Filter to only show the indices we want - now includes NIFTY futures
-        allowed_symbols = [
-            {"symbol": "NIFTY", "name": "NIFTY 50", "exchange": "NFO"},
-            {"symbol": "BANKNIFTY", "name": "BANKNIFTY", "exchange": "NFO"},
-            {"symbol": "FINNIFTY", "name": "FINNIFTY", "exchange": "NFO"},
-            {"symbol": "MIDCPNIFTY", "name": "MIDCPNIFTY", "exchange": "NFO"},
-            {"symbol": "SENSEX", "name": "SENSEX", "exchange": "BFO"},
-            {"symbol": "BANKEX", "name": "BANKEX", "exchange": "BFO"},
-            # NIFTY Futures
-            {"symbol": "NIFTY_FUT1", "name": "NIFTY Futures 1", "exchange": "NFO"},
-            {"symbol": "NIFTY_FUT2", "name": "NIFTY Futures 2", "exchange": "NFO"},
-            {"symbol": "NIFTY_ALT", "name": "NIFTY Alternative", "exchange": "NFO"}
-        ]
+        # Filter to show only configured symbols - using central configuration
+        allowed_symbols = SymbolsConfig.get_api_symbols_list()
         
         # Filter to only include symbols that have data today
         available_symbols = [s for s in allowed_symbols if s["symbol"] in all_symbols]
