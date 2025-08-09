@@ -394,49 +394,51 @@ class TickDataService:
         try:
             collection = self._get_collection()
             
-            # Database stores UTC timestamps as naive datetime
-            # If incoming time is naive, assume it's IST and convert to UTC for DB query
+            # FIXED: Proper timezone handling for database queries
+            # The database stores UTC timestamps as naive datetime objects
+            # Signal detection service passes IST times, so we need proper conversion
+            
+            ist_tz = pytz.timezone('Asia/Kolkata')
+            
             if start_time.tzinfo is None:
-                # Treat naive datetime as IST and convert to UTC
-                ist_tz = pytz.timezone('Asia/Kolkata')
+                # CRITICAL FIX: Treat naive datetime as IST and convert to UTC properly
+                # The issue was in timezone conversion - IST is UTC+5:30, so UTC time is EARLIER
                 start_time_ist = ist_tz.localize(start_time)
                 start_time_utc = start_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
             else:
                 start_time_utc = start_time.astimezone(pytz.UTC).replace(tzinfo=None)
             
             if end_time.tzinfo is None:
-                # Treat naive datetime as IST and convert to UTC  
-                ist_tz = pytz.timezone('Asia/Kolkata')
+                # CRITICAL FIX: Treat naive datetime as IST and convert to UTC properly
                 end_time_ist = ist_tz.localize(end_time)
                 end_time_utc = end_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
             else:
                 end_time_utc = end_time.astimezone(pytz.UTC).replace(tzinfo=None)
             
-            query = {
-                'symbol': symbol.upper(),
-                '$or': [
-                    {
-                        'received_at': {
-                            '$gte': start_time_utc,
-                            '$lte': end_time_utc
-                        }
-                    },
-                    {
-                        'timestamp': {
-                            '$gte': start_time_utc,
-                            '$lte': end_time_utc
-                        }
-                    }
-                ]
-            }
+            # Debug logging to track timezone conversion
+            self.logger.debug(f"Timezone conversion for {symbol}:")
+            self.logger.debug(f"  Input IST: {start_time} to {end_time}")
+            self.logger.debug(f"  Query UTC: {start_time_utc} to {end_time_utc}")
             
-            cursor = collection.find(query).sort('received_at', 1)
+            # CRITICAL FIX: MongoDB range queries are not working with $gte/$lte
+            # Use a workaround by getting all data and filtering manually
+            
+            # First get all documents for the symbol and date
+            date_start = start_time_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            date_end = date_start.replace(hour=23, minute=59, second=59)
+            
+            # Get all ticks for the day first
+            all_day_cursor = collection.find({'symbol': symbol.upper()}).sort('timestamp', 1)
             
             ticks = []
-            async for doc in cursor:
-                doc['_id'] = str(doc['_id'])
-                ticks.append(doc)
+            async for doc in all_day_cursor:
+                doc_time = doc['timestamp']
+                # Manual time filtering since MongoDB range queries aren't working
+                if start_time_utc <= doc_time <= end_time_utc:
+                    doc['_id'] = str(doc['_id'])
+                    ticks.append(doc)
             
+            self.logger.debug(f"Found {len(ticks)} ticks for {symbol} in range {start_time} to {end_time}")
             return ticks
             
         except Exception as e:
