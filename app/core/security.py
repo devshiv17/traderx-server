@@ -3,6 +3,7 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from .config import settings
+from ..utils.timezone_utils import TimezoneUtils
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,12 +25,14 @@ def get_password_hash(password: str) -> str:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create JWT access token."""
     to_encode = data.copy()
+    current_time = TimezoneUtils.get_ist_now()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = current_time + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
+        expire = current_time + timedelta(minutes=settings.access_token_expire_minutes)
     
-    to_encode.update({"exp": expire})
+    # Convert IST to Unix timestamp for JWT standard compliance
+    to_encode.update({"exp": TimezoneUtils.ist_to_unix_timestamp(expire)})
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
     return encoded_jwt
 

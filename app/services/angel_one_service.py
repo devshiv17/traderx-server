@@ -47,21 +47,32 @@ class AngelOneService:
         self.feed_token = None
         self.refresh_token = None
         
-        # Polling mode (instead of persistent WebSocket to avoid 429 errors)
+        # Rate-limited WebSocket mode for 2 tokens only (Option 3)
         self.websocket = None
         self.is_connected = False
         self.shutdown_flag = False
         self.connection_time = None
         self.subscribed_tokens = []
         
-        # REST API polling configuration
-        self.use_polling = True  # Use REST API polling instead of WebSocket
-        self.polling_interval = 25  # Poll every 25 seconds
+        # Rate-limited WebSocket configuration
+        self.use_polling = False  # Enable WebSocket for real-time data
+        self.polling_interval = 120  # Fallback polling if WebSocket fails
+        self.websocket_reconnect_delay = 30  # 30-second reconnect delay
+        self.max_subscriptions_per_connection = 2  # Limit to 2 tokens only
+        self.connection_retry_count = 0
+        self.max_connection_retries = 3
+        self.last_websocket_error = None
+        
+        # Rate limiting protection (based on Angel One forum recommendations)
+        self.max_retries = 2
+        self.base_delay = 60  # Base delay for exponential backoff
+        self.api_call_delay = 1.0  # 1 second delay between API calls (Angel One requirement)
+        self.rate_limit_detected = False
         self.last_poll_time = None
         self.polling_task = None
         
-        # Market data tokens - using central symbols configuration
-        self.market_tokens = SymbolsConfig.get_market_tokens()
+        # Market data tokens - LIMITED TO 2 TOKENS ONLY for rate limiting
+        self.market_tokens = self._get_limited_market_tokens()
         
         # Static futures mapping - using central symbols configuration
         self.futures_tokens = SymbolsConfig.get_futures_tokens_dict()
@@ -233,17 +244,17 @@ class AngelOneService:
                 logger.warning("📊 No futures found through search - trying known NIFTY futures tokens...")
                 
                 # Try current month NIFTY futures tokens - Aug 2025
-                # These tokens are for current month (August 2025) and next month
+                # These tokens are for current month (August 2025) based on master contract
                 known_futures_tokens = [
-                    # August 2025 NIFTY futures (current month)
-                    "67329",    # NIFTY25AUGFUT - Most likely current month
-                    "67330",    # NIFTY25SEPFUT - Next month
-                    # Additional potential August 2025 tokens
-                    "67331",    # NIFTY25OCTFUT 
-                    "67328",    # Alternative August token
-                    # Backup tokens from previous patterns
-                    "61234",    # Pattern-based token
-                    "61235",    # Pattern-based token  
+                    # August 2025 NIFTY futures (current month) - CORRECT TOKENS
+                    "64103",    # NIFTY28AUG25FUT - Verified from master contract
+                    # Additional August futures for diversified trading
+                    "64100",    # BANKNIFTY28AUG25FUT
+                    "64101",    # FINNIFTY28AUG25FUT
+                    "64102",    # MIDCPNIFTY28AUG25FUT
+                    # Fallback tokens (kept for compatibility)
+                    "67329",    # Old token - may be outdated
+                    "67330",    # Old token - may be outdated
                 ]
                 logger.info(f"Trying {len(known_futures_tokens)} known NIFTY futures tokens for August 2025...")
                 
@@ -327,14 +338,35 @@ class AngelOneService:
         
         return on_open, on_data, on_error, on_close
     
+    def _get_limited_market_tokens(self):
+        """Get only 2 tokens for rate-limited WebSocket: NIFTY + NIFTY28AUG25FUT"""
+        limited_tokens = []
+        
+        # 1. NIFTY Index token
+        nifty_index = SymbolsConfig.NIFTY_INDEX
+        limited_tokens.append({
+            "exchangeType": 1,  # NSE
+            "tokens": [nifty_index.token]
+        })
+        
+        # 2. NIFTY Futures token  
+        nifty_futures = SymbolsConfig.NIFTY_FUTURES
+        limited_tokens.append({
+            "exchangeType": 2,  # NFO
+            "tokens": [nifty_futures.token]
+        })
+        
+        logger.info(f"🎯 Limited WebSocket tokens: NIFTY ({nifty_index.token}) + {nifty_futures.symbol} ({nifty_futures.token})")
+        return limited_tokens
+    
     async def start_polling(self):
-        """Start REST API polling every 25 seconds (instead of WebSocket)"""
+        """Start REST API polling every 2 minutes (instead of WebSocket to avoid rate limits)"""
         try:
             if not self.auth_token:
                 logger.error("Not authenticated. Please authenticate first.")
                 return False
             
-            logger.info(f"🔄 Starting REST API polling every {self.polling_interval} seconds...")
+            logger.info(f"🔄 Starting REST API polling every {self.polling_interval} seconds (2 minutes) to avoid rate limits...")
             
             # Start polling task
             self.polling_task = asyncio.create_task(self._polling_loop())
@@ -375,13 +407,50 @@ class AngelOneService:
         
         logger.info("🛑 Polling loop stopped")
     
+    async def _fetch_with_retry(self, api_call):
+        """Execute API call with exponential backoff on rate limits"""
+        for attempt in range(self.max_retries):
+            try:
+                # Execute the API call
+                result = await asyncio.get_event_loop().run_in_executor(None, api_call)
+                
+                # If successful, reset rate limit flag
+                if self.rate_limit_detected:
+                    self.rate_limit_detected = False
+                    logger.info("✅ Rate limit recovered, resuming normal operation")
+                
+                return result
+                
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Check if it's a rate limiting error
+                if "exceeding access rate" in error_msg or "Access denied" in error_msg:
+                    self.rate_limit_detected = True
+                    delay = self.base_delay * (2 ** attempt)  # Exponential backoff
+                    
+                    logger.warning(f"⚠️ Rate limit detected (attempt {attempt + 1}/{self.max_retries}). Waiting {delay}s before retry...")
+                    
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error("❌ Max retries exceeded for rate limit. Skipping this cycle.")
+                        return None
+                else:
+                    # Non-rate-limit error, don't retry
+                    logger.error(f"❌ API call failed with non-rate-limit error: {e}")
+                    raise e
+        
+        return None
+    
     def _is_market_hours(self, dt: datetime) -> bool:
         """Check if current time is within market hours (9:15 AM - 3:30 PM IST)"""
         if dt.weekday() >= 5:  # Weekend
             return False
         
-        market_open = dt.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = dt.replace(hour=15, minute=30, second=0, microsecond=0)
+        market_open = datetime(dt.year, dt.month, dt.day, 9, 15, 0, 0)
+        market_close = datetime(dt.year, dt.month, dt.day, 15, 30, 0, 0)
         
         return market_open <= dt <= market_close
     
@@ -392,10 +461,9 @@ class AngelOneService:
                 logger.error("SmartAPI not initialized")
                 return
             
-            # Get NIFTY 50 data using central config
+            # Get NIFTY 50 data using central config with rate limiting protection
             nifty_symbol = SymbolsConfig.NIFTY_INDEX
-            nifty_data = await asyncio.get_event_loop().run_in_executor(
-                None, 
+            nifty_data = await self._fetch_with_retry(
                 lambda: self.smart_api.ltpData(nifty_symbol.exchange, nifty_symbol.name, nifty_symbol.token)
             )
             
@@ -406,6 +474,10 @@ class AngelOneService:
             else:
                 logger.warning("⚠️ Failed to fetch NIFTY data")
                 return
+            
+            # Angel One requirement: Add delay between API calls
+            logger.debug(f"⏱️ Waiting {self.api_call_delay}s between API calls (Angel One requirement)")
+            await asyncio.sleep(self.api_call_delay)
             
             # Fetch futures data using central config
             futures_symbol = SymbolsConfig.NIFTY_FUTURES
@@ -418,11 +490,10 @@ class AngelOneService:
                     trading_symbol = futures_info['trading_symbol']
                     exchange = futures_info.get('exchange', 'NFO')
                     
-                    logger.debug(f"📊 Fetching NIFTY25AUGFUT: {trading_symbol} (Token: {token})")
+                    logger.debug(f"📊 Fetching NIFTY Futures: {trading_symbol} (Token: {token})")
                     
-                    # Fetch real futures data
-                    futures_data = await asyncio.get_event_loop().run_in_executor(
-                        None,
+                    # Fetch real futures data with rate limiting protection
+                    futures_data = await self._fetch_with_retry(
                         lambda t=token, ts=trading_symbol, ex=exchange: self.smart_api.ltpData(ex, ts, t)
                     )
                     
@@ -472,7 +543,7 @@ class AngelOneService:
             tick_data = {
                 'symbol': symbol,
                 'price': float(data.get('ltp', 0)),
-                'timestamp': datetime.now(IST).astimezone(pytz.UTC).replace(tzinfo=None),
+                'timestamp': TimezoneUtils.get_ist_now(),
                 'token': data.get('symboltoken', ''),
                 'exchange': 'NSE',
                 'high': None,  # REST API doesn't provide OHLC
@@ -497,10 +568,64 @@ class AngelOneService:
             logger.error(f"❌ Error processing REST data for {symbol}: {e}")
     
     async def connect_websocket(self):
-        """Deprecated - Use polling mode instead to avoid 429 errors"""
-        logger.warning("⚠️  WebSocket connection disabled to avoid 429 rate limit errors")
-        logger.info("🔄 Using REST API polling mode instead")
-        return await self.start_polling()
+        """Rate-limited WebSocket connection for 2 tokens only"""
+        try:
+            if not self.auth_token or not self.feed_token:
+                logger.error("❌ Missing authentication tokens for WebSocket")
+                return False
+            
+            # Check if we've exceeded retry limit
+            if self.connection_retry_count >= self.max_connection_retries:
+                logger.error(f"❌ Max WebSocket retries ({self.max_connection_retries}) exceeded. Falling back to polling.")
+                return await self.start_polling()
+            
+            logger.info(f"🔗 Connecting rate-limited WebSocket (attempt {self.connection_retry_count + 1}/{self.max_connection_retries})...")
+            logger.info(f"🎯 Subscribing to only {len(self.market_tokens)} tokens to avoid rate limits")
+            
+            # Initialize WebSocket with rate limiting
+            self.websocket = SmartWebSocketV2(
+                auth_token=self.auth_token,
+                api_key=self.api_key,
+                client_code=self.client_code,
+                feed_token=self.feed_token
+            )
+            
+            # Setup callbacks
+            on_open, on_data, on_error, on_close = self._setup_websocket_callbacks()
+            self.websocket.on_open = on_open
+            self.websocket.on_data = on_data
+            self.websocket.on_error = on_error
+            self.websocket.on_close = on_close
+            
+            # Connect with delay to avoid rate limits
+            await asyncio.sleep(2)  # Initial delay
+            connection_result = await asyncio.get_event_loop().run_in_executor(
+                None, self.websocket.connect
+            )
+            
+            if connection_result:
+                logger.info("✅ Rate-limited WebSocket connected successfully")
+                self.connection_retry_count = 0  # Reset retry count on success
+                self.last_websocket_error = None
+                return True
+            else:
+                raise Exception("WebSocket connection failed")
+                
+        except Exception as e:
+            self.connection_retry_count += 1
+            self.last_websocket_error = str(e)
+            logger.error(f"❌ WebSocket connection failed (attempt {self.connection_retry_count}): {e}")
+            
+            if "429" in str(e) or "rate" in str(e).lower():
+                logger.warning(f"⚠️ Rate limit detected. Waiting {self.websocket_reconnect_delay}s before retry...")
+                await asyncio.sleep(self.websocket_reconnect_delay)
+            
+            # Fallback to polling if all retries failed
+            if self.connection_retry_count >= self.max_connection_retries:
+                logger.warning("🔄 Falling back to polling mode after WebSocket failures")
+                return await self.start_polling()
+            
+            return False
     
     async def _process_websocket_data(self, message):
         """Process incoming WebSocket market data - PRODUCTION GRADE"""
@@ -878,7 +1003,7 @@ class AngelOneService:
                     'strength': 'STRONG', 
                     'reason': f'Price down {change_percent:.2f}%',
                     'price': price,
-                    'timestamp': datetime.utcnow()
+                    'timestamp': TimezoneUtils.get_ist_now()
                 })
             
             # Store signals if any
@@ -947,13 +1072,13 @@ class AngelOneService:
             logger.info("✅ Angel One authentication successful")
             self.session_start_time = datetime.now(IST)
             
-            # Enable REST API polling for live data (avoids 429 errors)
-            await self.start_polling()
+            # Enable rate-limited WebSocket for real-time data (2 tokens only)
+            await self.connect_websocket()
             
             # Start health monitoring and auto-reconnection
             await self.start_health_monitoring()
             
-            logger.info("✅ Angel One feed service started with 25-second polling (no WebSocket rate limits)")
+            logger.info("✅ Angel One feed service started with rate-limited WebSocket (2 tokens only)")
         else:
             logger.error("❌ Failed to start Angel One feed service - authentication failed")
     

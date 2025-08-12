@@ -7,18 +7,15 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-import pytz
 from collections import defaultdict, deque
 
 from ..core.database import get_collection
 from ..core.symbols import SymbolsConfig
 from ..models.signal import SignalModel, SignalType, SignalStrength
 from .tick_data_service import tick_data_service
+from ..utils.timezone_utils import TimezoneUtils
 
 logger = logging.getLogger(__name__)
-
-# IST timezone
-IST = pytz.timezone('Asia/Kolkata')
 
 class TradingSession:
     def __init__(self, name: str, start_time: str, end_time: str):
@@ -82,7 +79,7 @@ class SignalDetectionService:
         self.monitoring_active = True
         
         # Reset session signal tracking for new day
-        today = datetime.now(IST).strftime('%Y-%m-%d')
+        today = TimezoneUtils.get_ist_now().strftime('%Y-%m-%d')
         self.session_signals = {}
         logger.info(f"📅 Reset session signal tracking for {today}")
         
@@ -110,10 +107,13 @@ class SignalDetectionService:
                 return
                 
             collection = get_collection('signals')
-            # Get signals that are still active (simplified query)
+            # Get today's active signals using timezone utilities
+            today_start_ist, today_end_ist = TimezoneUtils.ist_date_range(TimezoneUtils.get_ist_now())
+            today_start_utc = TimezoneUtils.to_ist(today_start_ist)
             
             active_signals_cursor = collection.find({
-                'status': 'ACTIVE'
+                'status': 'ACTIVE',
+                'created_at': {'$gte': today_start_utc}
             }).sort('created_at', -1).limit(50)
             
             signals = await active_signals_cursor.to_list(100)
@@ -181,7 +181,7 @@ class SignalDetectionService:
         """Main monitoring loop"""
         while self.monitoring_active:
             try:
-                current_time = datetime.now(IST)
+                current_time = TimezoneUtils.get_ist_now()
                 
                 # Only monitor during market hours (9:15 AM - 3:30 PM IST)
                 if not self._is_market_hours(current_time):
@@ -209,15 +209,17 @@ class SignalDetectionService:
     async def _process_historical_sessions(self):
         """Process sessions that may have already passed today"""
         try:
-            current_time = datetime.now(IST)
+            current_time = TimezoneUtils.get_ist_now()
             logger.info(f"🕐 Current time: {current_time.strftime('%H:%M:%S')}")
             
             for session in self.sessions:
-                session_start_time = datetime.strptime(session.start_time, "%H:%M").replace(
-                    year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=IST
+                # Use timezone utils for session time creation
+                session_date = current_time.date()
+                session_start_time = TimezoneUtils.to_ist(
+                    datetime.combine(session_date, datetime.strptime(session.start_time, "%H:%M").time())
                 )
-                session_end_time = datetime.strptime(session.end_time, "%H:%M").replace(
-                    year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=IST
+                session_end_time = TimezoneUtils.to_ist(
+                    datetime.combine(session_date, datetime.strptime(session.end_time, "%H:%M").time())
                 )
                 
                 logger.info(f"📅 Session {session.name}: {session_start_time.strftime('%H:%M')} - {session_end_time.strftime('%H:%M')}, Completed: {session.is_completed}")
@@ -295,15 +297,8 @@ class SignalDetectionService:
             logger.error(f"Full traceback: {traceback.format_exc()}")
     
     def _is_market_hours(self, current_time: datetime) -> bool:
-        """Check if current time is within market hours"""
-        # Market hours: 9:15 AM - 3:30 PM IST, Monday-Friday
-        if current_time.weekday() >= 5:  # Weekend
-            return False
-        
-        market_start = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_end = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
-        
-        return market_start <= current_time <= market_end
+        """Check if current time is within market hours using timezone utils"""
+        return TimezoneUtils.is_market_hours(current_time)
     
     async def _process_current_candle(self, current_time: datetime):
         """Process current 5-minute candle data"""
@@ -313,9 +308,9 @@ class SignalDetectionService:
             candle_start = current_time.replace(minute=candle_minute, second=0, microsecond=0)
             candle_end = candle_start + timedelta(minutes=5)
             
-            # Convert to naive datetime for database queries (remove timezone info)
-            candle_start_naive = candle_start.replace(tzinfo=None)
-            candle_end_naive = candle_end.replace(tzinfo=None)
+            # Convert to naive IST for database queries
+            candle_start_naive = TimezoneUtils.to_ist(candle_start)
+            candle_end_naive = TimezoneUtils.to_ist(candle_end)
             
             # Skip if we've already processed this candle
             if self.last_processed_time and candle_start <= self.last_processed_time:
@@ -596,8 +591,10 @@ class SignalDetectionService:
             if symbol not in self.price_data or len(self.price_data[symbol]) < 5:
                 return None
             
-            # Get today's data starting from 9:15 AM (IST)
-            today_start = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0, tzinfo=None)
+            # Get today's market open time in IST
+            today_ist = TimezoneUtils.get_ist_now()
+            market_open_ist, _ = TimezoneUtils.ist_market_hours(today_ist)
+            today_start = market_open_ist
             
             total_volume = 0
             total_price_volume = 0
@@ -779,7 +776,7 @@ class SignalDetectionService:
                 'session_name': session.name,
                 'signal_type': signal_type,
                 'reason': reason,
-                'timestamp': timestamp.replace(tzinfo=None) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp,
+                'timestamp': TimezoneUtils.to_ist(timestamp),
                 'nifty_price': nifty_price,
                 'future_price': future_price,
                 'future_symbol': future_symbol,
@@ -868,7 +865,7 @@ class SignalDetectionService:
             collection = get_collection('signals')
             await collection.update_one(
                 {'id': signal_id},
-                {'$set': {'status': 'REPLACED', 'updated_at': datetime.now(IST).replace(tzinfo=None)}}
+                {'$set': {'status': 'REPLACED', 'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())}}
             )
             
             logger.info(f"🔄 Deactivated signal: {signal_id}")
@@ -933,7 +930,7 @@ class SignalDetectionService:
                 confidence += 15
             
             # Time of day factor (higher confidence during active trading hours)
-            current_hour = datetime.now(IST).hour
+            current_hour = TimezoneUtils.get_ist_now().hour
             if 10 <= current_hour <= 14:  # Peak trading hours
                 confidence += 10
             
@@ -997,8 +994,8 @@ class SignalDetectionService:
             # Prepare document for insertion
             signal_doc = {
                 **signal_data,
-                'created_at': datetime.now(IST).replace(tzinfo=None),
-                'updated_at': datetime.now(IST).replace(tzinfo=None)
+                'created_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now()),
+                'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())
             }
             
             # Try to insert the signal
@@ -1028,13 +1025,14 @@ class SignalDetectionService:
         """Clean up old signals that are no longer relevant"""
         try:
             # Remove signals older than 4 hours from in-memory storage
-            cutoff_time = current_time - timedelta(hours=4)
+            cutoff_time_ist = current_time - timedelta(hours=4)
+            cutoff_time = cutoff_time_ist
             
             # Clean up active signals
             expired_signal_ids = []
             for signal_id, signal in self.active_signals.items():
                 if (signal.get('timestamp') and 
-                    signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    signal.get('timestamp') < cutoff_time):
                     expired_signal_ids.append(signal_id)
             
             for signal_id in expired_signal_ids:
@@ -1045,7 +1043,7 @@ class SignalDetectionService:
             expired_session_keys = []
             for session_key, session_signal in self.session_signals.items():
                 if (session_signal.get('timestamp') and 
-                    session_signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    session_signal.get('timestamp') < cutoff_time):
                     expired_session_keys.append(session_key)
             
             for session_key in expired_session_keys:
@@ -1063,7 +1061,7 @@ class SignalDetectionService:
                     {
                         '$set': {
                             'status': 'EXPIRED',
-                            'updated_at': datetime.now(IST).replace(tzinfo=None)
+                            'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())
                         }
                     }
                 )
@@ -1263,7 +1261,7 @@ class SignalDetectionService:
     
     async def get_session_status(self) -> List[Dict]:
         """Get current session status"""
-        current_time = datetime.now(IST)
+        current_time = TimezoneUtils.get_ist_now()
         session_status = []
         
         for session in self.sessions:

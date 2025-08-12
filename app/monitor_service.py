@@ -5,6 +5,7 @@ import requests
 import json
 from datetime import datetime
 import time
+from app.utils.timezone_utils import TimezoneUtils
 
 async def check_service_health():
     """Check the health of both market data and Angel One services"""
@@ -64,7 +65,7 @@ async def check_service_health():
 def print_health_status(market_status, angel_status):
     """Print formatted health status"""
     print("=" * 80)
-    print(f"🔍 Service Health Check - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔍 Service Health Check - {TimezoneUtils.get_ist_now().strftime('%Y-%m-%d %H:%M:%S IST')}")
     print("=" * 80)
     
     # Market Data Service Status

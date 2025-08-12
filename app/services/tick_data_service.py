@@ -7,9 +7,9 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-import pytz
 from ..core.database import get_collection
 from ..ws import broadcast_market_data, broadcast_price_update
+from ..utils.timezone_utils import TimezoneUtils
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +23,7 @@ class TickDataService:
         self.tick_buffer = {}  # Buffer for batch inserts
         self.buffer_size = 10  # Insert after 10 ticks
         self.buffer_timeout = 1.0  # Insert after 1 second
-        self.last_flush = datetime.now(pytz.timezone('Asia/Kolkata'))
-        
-        # Market hours configuration (IST)
-        self.market_timezone = pytz.timezone('Asia/Kolkata')
-        self.market_open_time = (9, 15)  # 9:15 AM
-        self.market_close_time = (15, 30)  # 3:30 PM
+        self.last_flush = TimezoneUtils.get_ist_now()
         
         # Tick deduplication - improved for indices
         self.last_tick_cache = {}  # symbol -> {price, timestamp}
@@ -48,33 +43,8 @@ class TickDataService:
         return self.collection
     
     def _is_market_hours(self, dt: Optional[datetime] = None) -> bool:
-        """Check if current time is within market hours"""
-        if dt is None:
-            dt = datetime.utcnow()
-        
-        # Convert to IST
-        dt_ist = dt.replace(tzinfo=pytz.UTC).astimezone(self.market_timezone)
-        
-        # Check if weekday (Monday=0, Sunday=6)
-        if dt_ist.weekday() >= 5:
-            return False
-        
-        # Check time range
-        current_time = dt_ist.time()
-        market_open = dt_ist.replace(
-            hour=self.market_open_time[0], 
-            minute=self.market_open_time[1], 
-            second=0, 
-            microsecond=0
-        ).time()
-        market_close = dt_ist.replace(
-            hour=self.market_close_time[0], 
-            minute=self.market_close_time[1], 
-            second=0, 
-            microsecond=0
-        ).time()
-        
-        return market_open <= current_time <= market_close
+        """Check if current time is within market hours using timezone utils"""
+        return TimezoneUtils.is_market_hours(dt)
     
     def _should_store_tick(self, symbol: str, price: float, timestamp: datetime) -> bool:
         """Determine if tick should be stored based on deduplication rules"""
@@ -126,8 +96,8 @@ class TickDataService:
             if not self._validate_tick_data(tick_data):
                 return False
             
-            # Check market hours
-            now = datetime.now(self.market_timezone)
+            # Check market hours using timezone utils
+            now = TimezoneUtils.get_ist_now()
             if not self._is_market_hours(now):
                 self.logger.debug(f"Skipping after-hours tick for {tick_data.get('symbol', 'Unknown')}")
                 return False
@@ -144,11 +114,11 @@ class TickDataService:
             if not self._should_store_tick(symbol, price, now):
                 return False
             
-            # Prepare tick document
+            # Prepare tick document with production timezone handling
             tick_doc = {
                 'symbol': symbol,
                 'price': price,
-                'timestamp': now,  # Market timestamp
+                'timestamp': now,  # Store as naive IST
                 'token': tick_data.get('token', ''),
                 'exchange': tick_data.get('exchange', 'NSE'),
                 'high': float(tick_data.get('high', 0)) if tick_data.get('high') else None,
@@ -158,7 +128,7 @@ class TickDataService:
                 'change_percent': float(tick_data.get('change_percent', 0)) if tick_data.get('change_percent') else None,
                 'source': tick_data.get('source', 'angel_one_websocket'),
                 'market_status': 'open',
-                'received_at': datetime.now(self.market_timezone)  # When our system received it
+                'received_at': TimezoneUtils.get_ist_now()  # When our system received it (naive IST)
             }
             
             # Add to buffer for batch insert
@@ -194,7 +164,7 @@ class TickDataService:
             # Convert the parsed data format to our internal format
             symbol = tick_data.get('symbol', '').upper()
             price = float(tick_data.get('price', 0))
-            timestamp = tick_data.get('timestamp', datetime.now(self.market_timezone))
+            timestamp = tick_data.get('timestamp', TimezoneUtils.get_ist_now())
             
             if not symbol or price <= 0:
                 self.logger.warning(f"Invalid tick data: {tick_data}")
@@ -204,11 +174,11 @@ class TickDataService:
             if not self._should_store_tick(symbol, price, timestamp):
                 return False
             
-            # Prepare tick document
+            # Prepare tick document with production timezone handling
             tick_doc = {
                 'symbol': symbol,
                 'price': price,
-                'timestamp': timestamp,
+                'timestamp': timestamp,  # Store as naive IST
                 'token': tick_data.get('token', ''),
                 'exchange': tick_data.get('exchange', 'NSE'),
                 'high': float(tick_data.get('high', 0)) if tick_data.get('high') else None,
@@ -218,7 +188,7 @@ class TickDataService:
                 'change_percent': float(tick_data.get('change_percent', 0)) if tick_data.get('change_percent') else None,
                 'source': tick_data.get('source', 'angel_one_websocket'),
                 'market_status': 'open',
-                'received_at': datetime.now(self.market_timezone)
+                'received_at': TimezoneUtils.get_ist_now()  # When our system received it (naive IST)
             }
             
             # Add to buffer for batch insert
@@ -255,7 +225,7 @@ class TickDataService:
     
     async def _maybe_flush_buffer(self) -> None:
         """Flush buffer if conditions are met"""
-        now = datetime.now(self.market_timezone)
+        now = TimezoneUtils.get_ist_now()
         
         # Count total buffered ticks
         total_ticks = sum(len(ticks) for ticks in self.tick_buffer.values())
@@ -311,7 +281,7 @@ class TickDataService:
             
             # Clear buffer
             self.tick_buffer.clear()
-            self.last_flush = datetime.now(self.market_timezone)
+            self.last_flush = TimezoneUtils.get_ist_now()
             
         except Exception as e:
             self.logger.error(f"Error flushing tick buffer: {e}", exc_info=True)
@@ -390,53 +360,34 @@ class TickDataService:
         start_time: datetime, 
         end_time: datetime
     ) -> List[Dict[str, Any]]:
-        """Get ticks for a specific time range"""
+        """Get ticks for a specific time range with production timezone handling"""
         try:
             collection = self._get_collection()
             
-            # FIXED: Proper timezone handling for database queries
-            # The database stores UTC timestamps as naive datetime objects
-            # Signal detection service passes IST times, so we need proper conversion
-            
-            ist_tz = pytz.timezone('Asia/Kolkata')
-            
-            if start_time.tzinfo is None:
-                # CRITICAL FIX: Treat naive datetime as IST and convert to UTC properly
-                # The issue was in timezone conversion - IST is UTC+5:30, so UTC time is EARLIER
-                start_time_ist = ist_tz.localize(start_time)
-                start_time_utc = start_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
-            else:
-                start_time_utc = start_time.astimezone(pytz.UTC).replace(tzinfo=None)
-            
-            if end_time.tzinfo is None:
-                # CRITICAL FIX: Treat naive datetime as IST and convert to UTC properly
-                end_time_ist = ist_tz.localize(end_time)
-                end_time_utc = end_time_ist.astimezone(pytz.UTC).replace(tzinfo=None)
-            else:
-                end_time_utc = end_time.astimezone(pytz.UTC).replace(tzinfo=None)
+            # Convert input times to naive IST for database query
+            start_time_ist = TimezoneUtils.to_ist(start_time)
+            end_time_ist = TimezoneUtils.to_ist(end_time)
             
             # Debug logging to track timezone conversion
             self.logger.debug(f"Timezone conversion for {symbol}:")
             self.logger.debug(f"  Input IST: {start_time} to {end_time}")
-            self.logger.debug(f"  Query UTC: {start_time_utc} to {end_time_utc}")
+            self.logger.debug(f"  Query IST: {start_time_ist} to {end_time_ist}")
             
-            # CRITICAL FIX: MongoDB range queries are not working with $gte/$lte
-            # Use a workaround by getting all data and filtering manually
+            # Query with proper timezone handling
+            query = {
+                'symbol': symbol.upper(),
+                'timestamp': {
+                    '$gte': start_time_ist,
+                    '$lte': end_time_ist
+                }
+            }
             
-            # First get all documents for the symbol and date
-            date_start = start_time_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            date_end = date_start.replace(hour=23, minute=59, second=59)
-            
-            # Get all ticks for the day first
-            all_day_cursor = collection.find({'symbol': symbol.upper()}).sort('timestamp', 1)
+            cursor = collection.find(query).sort('timestamp', 1)
             
             ticks = []
-            async for doc in all_day_cursor:
-                doc_time = doc['timestamp']
-                # Manual time filtering since MongoDB range queries aren't working
-                if start_time_utc <= doc_time <= end_time_utc:
-                    doc['_id'] = str(doc['_id'])
-                    ticks.append(doc)
+            async for doc in cursor:
+                doc['_id'] = str(doc['_id'])
+                ticks.append(doc)
             
             self.logger.debug(f"Found {len(ticks)} ticks for {symbol} in range {start_time} to {end_time}")
             return ticks
@@ -446,9 +397,11 @@ class TickDataService:
             return []
     
     async def cleanup_old_ticks(self, days_to_keep: int = 7) -> int:
-        """Clean up old tick data"""
+        """Clean up old tick data with production timezone handling"""
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+            # Calculate cutoff date in IST, then convert to naive UTC for database query
+            cutoff_date_ist = TimezoneUtils.get_ist_now() - timedelta(days=days_to_keep)
+            cutoff_date = TimezoneUtils.to_ist(cutoff_date_ist)
             collection = self._get_collection()
             
             result = await collection.delete_many({

@@ -32,8 +32,8 @@ class SymbolsConfig:
     )
     
     NIFTY_FUTURES = TradingSymbol(
-        symbol="NIFTY25AUGFUT",
-        token="67329",
+        symbol="NIFTY28AUG25FUT",
+        token="64103",
         name="NIFTY August 2025 Futures",
         exchange="NFO",
         exchange_type=2,

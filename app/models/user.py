@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, EmailStr
 from bson import ObjectId
+from ..utils.timezone_utils import TimezoneUtils
 
 
 class PyObjectId(ObjectId):
@@ -23,8 +24,8 @@ class UserModel(BaseModel):
     hashed_password: str = Field(...)
     is_active: bool = Field(default=True)
     is_verified: bool = Field(default=False)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
+    updated_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
     
     class Config:
         populate_by_name = True

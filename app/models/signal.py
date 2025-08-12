@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from bson import ObjectId
 from .user import PyObjectId
 from enum import Enum
+from ..utils.timezone_utils import TimezoneUtils
 
 
 class SignalType(str, Enum):
@@ -77,8 +78,8 @@ class SignalModel(BaseModel):
     signal_time: Optional[datetime] = Field(default=None)  # When signal was generated
     entry_time: Optional[datetime] = Field(default=None)   # When position was taken
     exit_time: Optional[datetime] = Field(default=None)    # When position was closed
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
+    updated_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
     
     class Config:
         populate_by_name = True

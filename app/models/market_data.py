@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, validator
 from bson import ObjectId
 from .user import PyObjectId
+from ..utils.timezone_utils import TimezoneUtils
 
 
 class MarketDataModel(BaseModel):
@@ -40,7 +41,7 @@ class MarketDataModel(BaseModel):
     depth: Optional[Dict[str, Any]] = Field(None, description="Market depth data")
     
     # Metadata
-    received_at: datetime = Field(default_factory=datetime.utcnow, description="Timestamp when data was received")
+    received_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now, description="Timestamp when data was received (IST)")
     source: str = Field(default="angel_one_websocket", description="Data source")
     processed: bool = Field(default=False, description="Whether data has been processed")
     
@@ -185,7 +186,7 @@ class MarketDataBatch(BaseModel):
     """Model for batch market data operations"""
     data: List[MarketDataModel] = Field(..., description="List of market data entries")
     batch_id: Optional[str] = Field(None, description="Unique batch identifier")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
     
     class Config:
         populate_by_name = True

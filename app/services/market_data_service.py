@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 from bson import ObjectId
 from logzero import logger
-import pytz
 
 from ..core.database import get_collection
 from ..models.market_data import MarketDataModel, MarketDataBatch, MarketDataFilter, MarketDataResponse
+from ..utils.timezone_utils import TimezoneUtils
 
 
 class MarketDataService:
@@ -25,15 +25,9 @@ class MarketDataService:
     
     def _is_market_hours(self, dt: datetime) -> bool:
         """
-        Check if a datetime is within Indian market hours (09:15–15:30 IST, Mon–Fri)
+        Check if a datetime is within Indian market hours using timezone utils
         """
-        ist = pytz.timezone('Asia/Kolkata')
-        dt_ist = dt.astimezone(ist)
-        if dt_ist.weekday() >= 5:  # 5=Saturday, 6=Sunday
-            return False
-        market_open = dt_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = dt_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-        return market_open <= dt_ist <= market_close
+        return TimezoneUtils.is_market_hours(dt)
 
     async def store_market_data(self, data: Union[MarketDataModel, Dict[str, Any]]) -> str:
         """
@@ -57,10 +51,10 @@ class MarketDataService:
                 self.logger.warning(f"⚠️ Skipping invalid market data for {market_data.symbol}: {market_data.raw_data}")
                 return None
 
-            # Check for after-hours
-            now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
-            if not self._is_market_hours(now_utc):
-                self.logger.info(f"⏰ Skipping after-hours data for {market_data.symbol} at {now_utc}")
+            # Check for after-hours using timezone utils
+            now_ist = TimezoneUtils.get_ist_now()
+            if not self._is_market_hours(now_ist):
+                self.logger.info(f"⏰ Skipping after-hours data for {market_data.symbol} at {now_ist}")
                 return None
 
             # Check for duplicates (same symbol within last 5 seconds)
@@ -68,8 +62,8 @@ class MarketDataService:
                 self.logger.debug(f"🔄 Skipping duplicate data for {market_data.symbol}")
                 return None
             
-            # Add metadata
-            market_data.received_at = now_utc
+            # Add metadata with proper timezone handling
+            market_data.received_at = now_ist
             market_data.source = "angel_one_websocket"
             market_data.processed = False
             market_data.is_realtime = True
@@ -141,7 +135,8 @@ class MarketDataService:
         """
         try:
             # Check for recent data with same symbol and similar price
-            cutoff_time = datetime.utcnow().replace(second=datetime.utcnow().second - 5)
+            cutoff_time_ist = TimezoneUtils.get_ist_now() - timedelta(seconds=5)
+            cutoff_time = cutoff_time_ist
             
             query = {
                 "symbol": market_data.symbol,
@@ -168,7 +163,7 @@ class MarketDataService:
         """
         try:
             documents = []
-            now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
+            now_ist = TimezoneUtils.get_ist_now()
             for data in data_list:
                 # Convert dict to MarketDataModel if needed
                 if isinstance(data, dict):
@@ -176,9 +171,9 @@ class MarketDataService:
                 else:
                     market_data = data
 
-                # After-hours filter
-                if not self._is_market_hours(now_utc):
-                    self.logger.info(f"⏰ Skipping after-hours data for {market_data.symbol} at {now_utc}")
+                # After-hours filter using timezone utils
+                if not self._is_market_hours(now_ist):
+                    self.logger.info(f"⏰ Skipping after-hours data for {market_data.symbol} at {now_ist}")
                     continue
 
                 # Validate
@@ -186,8 +181,8 @@ class MarketDataService:
                     self.logger.warning(f"⚠️ Skipping invalid market data for {market_data.symbol}: {market_data.raw_data}")
                     continue
 
-                # Add metadata
-                market_data.received_at = now_utc
+                # Add metadata with proper timezone handling
+                market_data.received_at = now_ist
                 market_data.source = "angel_one_websocket"
                 market_data.processed = False
                 market_data.is_realtime = True
@@ -376,7 +371,7 @@ class MarketDataService:
             # Update documents
             result = await self._get_collection().update_many(
                 {"_id": {"$in": object_ids}},
-                {"$set": {"processed": True, "processed_at": datetime.utcnow()}}
+                {"$set": {"processed": True, "processed_at": TimezoneUtils.get_ist_now()}}
             )
             
             self.logger.info(f"📊 Marked {result.modified_count} market data entries as processed")
@@ -397,7 +392,8 @@ class MarketDataService:
             int: Number of deleted documents
         """
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date_ist = TimezoneUtils.get_ist_now() - timedelta(days=days)
+            cutoff_date = cutoff_date_ist
             
             result = await self._get_collection().delete_many({
                 "received_at": {"$lt": cutoff_date}
@@ -551,11 +547,11 @@ class MarketDataService:
             if not prices:
                 continue
             
-            # Convert UTC to IST (UTC+5:30)
-            ist_timestamp = timestamp + timedelta(hours=5, minutes=30)
+            # Convert UTC to IST using timezone utils
+            ist_timestamp = TimezoneUtils.to_ist(timestamp)
             
             aggregated_point = {
-                "time": ist_timestamp.isoformat(),
+                "time": TimezoneUtils.format_for_api(ist_timestamp),
                 "open": group[0].get("ltpc", 0),
                 "high": max(prices),
                 "low": min(prices),
@@ -630,10 +626,11 @@ class MarketDataService:
             latest_doc = await self._get_collection().find_one({}, sort=[("received_at", -1)])
             latest_timestamp = latest_doc.get("received_at") if latest_doc else None
             
-            # Calculate data freshness
+            # Calculate data freshness using timezone utils
             data_freshness = None
             if latest_timestamp:
-                time_diff = datetime.utcnow() - latest_timestamp
+                current_ist = TimezoneUtils.get_ist_now()
+                time_diff = current_ist - latest_timestamp
                 data_freshness = {
                     "seconds_ago": int(time_diff.total_seconds()),
                     "minutes_ago": int(time_diff.total_seconds() / 60),

@@ -23,7 +23,7 @@ except ImportError:
 
 class Settings(BaseSettings):
     # MongoDB Configuration
-    mongodb_url: str = "mongodb+srv://mail2shivap17:syqzpekjQBCc9oee@traders.w2xrjgy.mongodb.net/?retryWrites=true&w=majority&appName=traders"
+    mongodb_url: str = os.getenv("MONGODB_URL", "")
     database_name: str = "trading_signals"
     
     # JWT Configuration
