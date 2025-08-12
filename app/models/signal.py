@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from bson import ObjectId
 from .user import PyObjectId
 from enum import Enum
+from ..utils.timezone_utils import TimezoneUtils
 
 
 class SignalType(str, Enum):
@@ -51,12 +52,34 @@ class SignalModel(BaseModel):
     volume_confirmation: Optional[bool] = Field(default=None)
     technical_data: Optional[Dict[str, Any]] = Field(default=None)
     
+    # Enhanced Nifty Futures fields
+    future_session_high: Optional[float] = Field(default=None, description="Session high for the futures contract")
+    future_session_low: Optional[float] = Field(default=None, description="Session low for the futures contract")
+    future_open: Optional[float] = Field(default=None, description="Day's open price for futures")
+    future_close: Optional[float] = Field(default=None, description="Previous day's close for futures")
+    future_volume: Optional[int] = Field(default=None, description="Current volume for futures")
+    future_change: Optional[float] = Field(default=None, description="Change in futures price")
+    future_change_percent: Optional[float] = Field(default=None, description="Change percentage in futures")
+    
+    # Breakout details for both index and futures
+    nifty_breakout_amount: Optional[float] = Field(default=None, description="Amount by which Nifty broke the level")
+    future_breakout_amount: Optional[float] = Field(default=None, description="Amount by which futures broke the level")
+    nifty_breaks_high: Optional[bool] = Field(default=None, description="Whether Nifty broke session high")
+    nifty_breaks_low: Optional[bool] = Field(default=None, description="Whether Nifty broke session low")
+    future_breaks_high: Optional[bool] = Field(default=None, description="Whether futures broke session high")
+    future_breaks_low: Optional[bool] = Field(default=None, description="Whether futures broke session low")
+    
+    # Additional market data
+    market_sentiment: Optional[str] = Field(default=None, description="Overall market sentiment")
+    volatility_index: Optional[float] = Field(default=None, description="VIX or volatility measure")
+    correlation_score: Optional[float] = Field(default=None, description="Correlation between index and futures movement")
+    
     # Timestamps
     signal_time: Optional[datetime] = Field(default=None)  # When signal was generated
     entry_time: Optional[datetime] = Field(default=None)   # When position was taken
     exit_time: Optional[datetime] = Field(default=None)    # When position was closed
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
+    updated_at: datetime = Field(default_factory=TimezoneUtils.get_ist_now)
     
     class Config:
         populate_by_name = True
@@ -76,6 +99,23 @@ class SignalModel(BaseModel):
                 "confidence": 85,
                 "status": "ACTIVE",
                 "session_name": "Morning Opening",
+                "nifty_price": 22450.0,
+                "future_price": 22465.5,
+                "future_symbol": "NIFTY_FUT1",
+                "session_high": 22425.0,
+                "session_low": 22380.0,
+                "future_session_high": 22440.0,
+                "future_session_low": 22395.0,
+                "nifty_breaks_high": True,
+                "future_breaks_high": True,
+                "nifty_breakout_amount": 25.0,
+                "future_breakout_amount": 25.5,
+                "vwap_nifty": 22410.0,
+                "vwap_future": 22420.0,
+                "future_change": 85.5,
+                "future_change_percent": 0.38,
+                "market_sentiment": "BULLISH",
+                "correlation_score": 0.95,
                 "notes": "Bullish breakout - Both NIFTY and Futures crossed session high"
             }
         }

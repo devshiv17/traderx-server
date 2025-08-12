@@ -87,7 +87,8 @@ class UserService:
                 update_data["hashed_password"] = get_password_hash(update_data["password"])
                 del update_data["password"]
             
-            update_data["updated_at"] = datetime.utcnow()
+            from ..utils.timezone_utils import TimezoneUtils
+            update_data["updated_at"] = TimezoneUtils.get_ist_now()
             
             result = await collection.update_one(
                 {"_id": ObjectId(user_id)},

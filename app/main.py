@@ -76,15 +76,51 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Database events
 @app.on_event("startup")
 async def startup_db_client():
-    await connect_to_mongo()
-    # Start Angel One WebSocket feed service
-    await angel_one_service.start_feed_service()
-    # Start WebSocket queue processor for live data
-    asyncio.create_task(angel_one_service.process_ws_queue())
-    # Start signal detection service
-    await signal_detection_service.start_monitoring()
-    # Start monitoring service
-    asyncio.create_task(start_monitoring_service())
+    try:
+        logger.info("🚀 Starting Trading Signals API...")
+        
+        # Step 1: Connect to MongoDB first
+        logger.info("📊 Connecting to MongoDB Atlas...")
+        await connect_to_mongo()
+        logger.info("✅ MongoDB connection established")
+        
+        # Step 2: Start Angel One service (but don't wait for it to fully complete)
+        logger.info("📈 Starting Angel One service...")
+        asyncio.create_task(angel_one_service.start_feed_service())
+        
+        # Step 3: Start WebSocket queue processor
+        logger.info("🔄 Starting WebSocket queue processor...")
+        asyncio.create_task(angel_one_service.process_ws_queue())
+        
+        # Step 4: Start signal detection service with safe initialization
+        logger.info("🎯 Starting signal detection service...")
+        asyncio.create_task(safe_start_signal_detection())
+        
+        # Step 5: Start monitoring service
+        logger.info("📊 Starting monitoring service...")
+        asyncio.create_task(start_monitoring_service())
+        
+        logger.info("✅ All services started successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Error during startup: {e}")
+        # Don't crash the server, just log the error
+
+
+async def safe_start_signal_detection():
+    """Safely start signal detection service with retry logic"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await signal_detection_service.start_monitoring()
+            logger.info("✅ Signal detection service started successfully")
+            return
+        except Exception as e:
+            logger.warning(f"⚠️ Signal detection service start attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(5)  # Wait 5 seconds before retry
+            else:
+                logger.error("❌ Signal detection service failed to start after all retries")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

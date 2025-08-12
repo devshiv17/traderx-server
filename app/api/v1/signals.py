@@ -11,10 +11,141 @@ from datetime import datetime, timedelta
 
 from ...services.signal_detection_service import signal_detection_service
 from ...models.signal import SignalModel, SignalType, SignalStrength
+from ...utils.timezone_utils import TimezoneUtils
+import motor.motor_asyncio
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/signals/test")
+async def get_signals_test():
+    """
+    Test endpoint that returns mock signals data
+    """
+    mock_signals = [
+        {
+            "id": "Morning_Opening_BUY_PUT_093353",
+            "session_name": "Morning Opening",
+            "signal_type": "BUY_PUT",
+            "timestamp": "2025-08-07T09:33:53",
+            "entry_price": 24628.6,
+            "stop_loss": 24676.49,
+            "target_1": 24607.15,
+            "target_2": 24585.7,
+            "confidence": 87,
+            "status": "EXPIRED",
+            "symbol": "NIFTY",
+            "display_text": "BUY PUT signal for Morning Opening session"
+        },
+        {
+            "id": "Mid_Morning_BUY_CALL_095334",
+            "session_name": "Mid Morning", 
+            "signal_type": "BUY_CALL",
+            "timestamp": "2025-08-07T09:53:34",
+            "entry_price": 24650.2,
+            "stop_loss": 24600.1,
+            "target_1": 24680.5,
+            "target_2": 24720.8,
+            "confidence": 92,
+            "status": "EXPIRED",
+            "symbol": "NIFTY",
+            "display_text": "BUY CALL signal for Mid Morning session"
+        }
+    ]
+    
+    return JSONResponse(
+        content={
+            "signals": mock_signals,
+            "count": len(mock_signals),
+            "source": "mock_data",
+            "timestamp": TimezoneUtils.get_ist_now().isoformat()
+        },
+        status_code=status.HTTP_200_OK
+    )
+
+
+@router.get("/signals/direct")
+async def get_signals_direct():
+    """
+    Direct access to signals with production-grade timezone handling
+    
+    Returns TODAY'S signals only using centralized timezone utilities
+    """
+    import pymongo
+    
+    try:
+        # Use centralized timezone utilities
+        current_time_ist = TimezoneUtils.get_ist_now()
+        today = current_time_ist.date()
+        
+        # Direct database access
+        mongodb_url = "mongodb+srv://mail2shivap17:syqzpekjQBCc9oee@traders.w2xrjgy.mongodb.net/?retryWrites=true&w=majority&appName=traders"
+        client = pymongo.MongoClient(mongodb_url)
+        db = client['trading_signals']
+        signals_collection = db['signals']
+        
+        # Get today's signals using timezone utils
+        cursor = signals_collection.find().sort('created_at', -1)
+        today_signals = []
+        
+        for signal_doc in cursor:
+            created_at = signal_doc.get('created_at')
+            if created_at and TimezoneUtils.is_today_ist(created_at):
+                # Convert to JSON serializable format with proper timezone handling
+                signal_data = {}
+                for key, value in signal_doc.items():
+                    if key == '_id':
+                        signal_data['_id'] = str(value)
+                    elif isinstance(value, datetime):
+                        signal_data[key] = TimezoneUtils.format_for_api(value)
+                    elif value is None and key in ['nifty_price', 'future_price', 'entry_price', 'stop_loss', 'target_1', 'target_2']:
+                        # Handle null price values
+                        if key in ['nifty_price', 'future_price'] and signal_doc.get('entry_price'):
+                            signal_data[key] = signal_doc.get('entry_price')
+                        else:
+                            signal_data[key] = 0
+                    else:
+                        signal_data[key] = value
+                today_signals.append(signal_data)
+        
+        client.close()
+        
+        return JSONResponse(
+            content={
+                "date": today.isoformat(),
+                "signals": today_signals,
+                "count": len(today_signals),
+                "filtered_by": "today_only_production",
+                "current_time_ist": TimezoneUtils.format_for_api(current_time_ist),
+                "timezone": "IST",
+                "market_status": "open" if TimezoneUtils.is_market_hours() else "closed",
+                "source": "direct_mongodb_production",
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+            },
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Direct signals access failed: {e}")
+        
+        # Safe fallback using timezone utils
+        today = TimezoneUtils.get_ist_now().date()
+        
+        return JSONResponse(
+            content={
+                "date": today.isoformat(),
+                "error": str(e),
+                "signals": [],
+                "count": 0,
+                "filtered_by": "today_only_production",
+                "timezone": "IST",
+                "source": "direct_mongodb_failed",
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+            },
+            status_code=status.HTTP_200_OK
+        )
 
 
 @router.post("/signals/start-monitoring")
@@ -31,7 +162,7 @@ async def start_signal_monitoring():
             content={
                 "message": "Signal monitoring started successfully",
                 "status": "running",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -56,7 +187,7 @@ async def stop_signal_monitoring():
             content={
                 "message": "Signal monitoring stopped successfully",
                 "status": "stopped",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -94,7 +225,7 @@ async def get_active_signals():
             content={
                 "signals": json_signals,
                 "count": len(json_signals),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -123,7 +254,46 @@ async def get_signal_history(
     Returns past signals with optional filtering
     """
     try:
-        signals = await signal_detection_service.get_signal_history(limit=limit)
+        # Try to get signals from the service first
+        try:
+            signals = await signal_detection_service.get_signal_history(limit=limit)
+        except Exception as service_error:
+            logger.warning(f"Signal detection service failed: {service_error}, trying direct database access")
+            
+            # Direct MongoDB Atlas access as fallback
+            import motor.motor_asyncio
+            from ...core.config import settings
+            
+            client = motor.motor_asyncio.AsyncIOMotorClient(settings.mongodb_url)
+            db = client[settings.database_name]
+            signals_collection = db['signals']
+            
+            signals = []
+            async for signal_doc in signals_collection.find().sort('created_at', -1).limit(limit):
+                signal_data = {
+                    'id': signal_doc.get('id', str(signal_doc.get('_id', ''))),
+                    'session_name': signal_doc.get('session_name'),
+                    'signal_type': signal_doc.get('signal_type'),
+                    'reason': signal_doc.get('reason'),
+                    'timestamp': signal_doc.get('timestamp'),
+                    'nifty_price': signal_doc.get('nifty_price'),
+                    'future_price': signal_doc.get('future_price'),
+                    'future_symbol': signal_doc.get('future_symbol'),
+                    'entry_price': signal_doc.get('entry_price'),
+                    'stop_loss': signal_doc.get('stop_loss'),
+                    'target_1': signal_doc.get('target_1'),
+                    'target_2': signal_doc.get('target_2'),
+                    'confidence': signal_doc.get('confidence'),
+                    'status': signal_doc.get('status'),
+                    'session_high': signal_doc.get('session_high'),
+                    'session_low': signal_doc.get('session_low'),
+                    'created_at': signal_doc.get('created_at'),
+                    'display_text': signal_doc.get('display_text')
+                }
+                signals.append(signal_data)
+            
+            client.close()
+            logger.info(f"Retrieved {len(signals)} signals from direct MongoDB Atlas access")
         
         # Apply filters
         filtered_signals = signals
@@ -173,7 +343,7 @@ async def get_signal_history(
                         "session_name": session_name,
                         "group_by_session": group_by_session
                     },
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -189,7 +359,7 @@ async def get_signal_history(
                         "session_name": session_name,
                         "group_by_session": group_by_session
                     },
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -205,27 +375,114 @@ async def get_signal_history(
 @router.get("/signals/sessions")
 async def get_session_status():
     """
-    Get current trading session status
+    Get current trading session status with production-grade timezone handling
     
-    Returns information about all trading sessions and their current state
+    Returns TODAY'S signals only using centralized timezone utilities
     """
     try:
-        sessions = await signal_detection_service.get_session_status()
+        import pymongo
+        from ...core.config import settings
+        
+        # Use centralized timezone utilities
+        current_time_ist = TimezoneUtils.get_ist_now()
+        today = current_time_ist.date()
+        
+        # Use configuration for database access
+        client = pymongo.MongoClient(settings.mongodb_url)
+        db = client['trading_signals']
+        signals_collection = db['signals']
+        
+        # Get all signals and filter by today's date using timezone utils
+        cursor = signals_collection.find().sort('created_at', -1)
+        today_signals = []
+        
+        for signal_doc in cursor:
+            created_at = signal_doc.get('created_at')
+            if created_at and TimezoneUtils.is_today_ist(created_at):
+                # Convert to JSON serializable format with proper timezone handling
+                signal_data = {}
+                for key, value in signal_doc.items():
+                    if key == '_id':
+                        signal_data['_id'] = str(value)
+                    elif isinstance(value, datetime):
+                        signal_data[key] = TimezoneUtils.format_for_api(value)
+                    else:
+                        signal_data[key] = value
+                today_signals.append(signal_data)
+        
+        client.close()
+        
+        # Define sessions with proper timezone-aware times
+        sessions_data = {
+            "Morning Opening": {"name": "Morning Opening", "time": "09:30-09:35", "signals": [], "is_active": False},
+            "Mid Morning": {"name": "Mid Morning", "time": "09:45-09:55", "signals": [], "is_active": False},
+            "Pre Lunch": {"name": "Pre Lunch", "time": "10:30-10:45", "signals": [], "is_active": False},
+            "Lunch Break": {"name": "Lunch Break", "time": "11:50-12:20", "signals": [], "is_active": False}
+        }
+        
+        # Distribute signals to sessions
+        for signal in today_signals:
+            session_name = signal.get('session_name')
+            if session_name in sessions_data:
+                sessions_data[session_name]['signals'].append(signal)
+        
+        # Determine active sessions using timezone utils
+        current_hour = current_time_ist.hour
+        current_minute = current_time_ist.minute
+        current_time_minutes = current_hour * 60 + current_minute
+        
+        # Session times in minutes from midnight
+        session_times = {
+            "Morning Opening": (9*60 + 30, 9*60 + 35),
+            "Mid Morning": (9*60 + 45, 9*60 + 55),
+            "Pre Lunch": (10*60 + 30, 10*60 + 45),
+            "Lunch Break": (11*60 + 50, 12*60 + 20)
+        }
+        
+        for session_name, (start_minutes, end_minutes) in session_times.items():
+            if start_minutes <= current_time_minutes <= end_minutes:
+                sessions_data[session_name]['is_active'] = True
+                break
+        
+        sessions_list = list(sessions_data.values())
+        total_signals_today = len(today_signals)
+        active_sessions = [s for s in sessions_list if s['is_active']]
         
         return JSONResponse(
             content={
-                "sessions": sessions,
-                "count": len(sessions),
-                "timestamp": datetime.utcnow().isoformat()
+                "date": today.isoformat(),
+                "sessions": sessions_list,
+                "count": len(sessions_list),
+                "total_signals_today": total_signals_today,
+                "active_sessions": len(active_sessions),
+                "filtered_by": "today_only_production",
+                "current_time_ist": TimezoneUtils.format_for_api(current_time_ist),
+                "timezone": "IST",
+                "market_status": "open" if TimezoneUtils.is_market_hours() else "closed",
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
             },
             status_code=status.HTTP_200_OK
         )
         
     except Exception as e:
         logger.error(f"Error getting session status: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve session status"
+        
+        # Safe fallback using timezone utils
+        today = TimezoneUtils.get_ist_now().date()
+        
+        return JSONResponse(
+            content={
+                "date": today.isoformat(),
+                "sessions": [],
+                "count": 0,
+                "total_signals_today": 0,
+                "active_sessions": 0,
+                "filtered_by": "today_only_production",
+                "timezone": "IST",
+                "error": str(e),
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+            },
+            status_code=status.HTTP_200_OK
         )
 
 
@@ -251,7 +508,7 @@ async def get_technical_analysis(symbol: str):
                         "recent_candles": [],
                         "volume_data": []
                     },
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -262,7 +519,7 @@ async def get_technical_analysis(symbol: str):
         return JSONResponse(
             content={
                 "technical_data": technical_data,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -284,7 +541,7 @@ async def get_technical_analysis(symbol: str):
                     "recent_candles": [],
                     "volume_data": []
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -299,6 +556,8 @@ async def get_monitoring_status():
     """
     try:
         import pytz
+        import pymongo
+        
         IST = pytz.timezone('Asia/Kolkata')
         current_time = datetime.now(IST)
         
@@ -311,20 +570,74 @@ async def get_monitoring_status():
             current_time.hour >= 9 and current_time.hour < 16  # 9 AM - 4 PM
         )
         
-        # Get latest signal
-        signals = await signal_detection_service.get_signal_history(limit=1)
-        latest_signal = signals[0] if signals else None
-        
-        # Convert latest_signal datetime objects to strings for JSON serialization
+        # Get TODAY'S signals from database directly
         latest_signal_json = None
-        if latest_signal:
-            latest_signal_json = {
-                "symbol": latest_signal.get("symbol"),
-                "signal_type": latest_signal.get("signal_type"),
-                "confidence": latest_signal.get("confidence"),
-                "session_name": latest_signal.get("session_name"),
-                "timestamp": latest_signal.get("timestamp").isoformat() if latest_signal.get("timestamp") else None
-            }
+        all_signals = []
+        
+        try:
+            # Direct database access
+            mongodb_url = "mongodb+srv://mail2shivap17:syqzpekjQBCc9oee@traders.w2xrjgy.mongodb.net/?retryWrites=true&w=majority&appName=traders"
+            client = pymongo.MongoClient(mongodb_url)
+            db = client['trading_signals']
+            signals_collection = db['signals']
+            
+            # Get today's date for filtering
+            today_ist = current_time.date()
+            
+            # Get all signals and filter for today only
+            cursor = signals_collection.find().sort('created_at', -1)
+            for signal_doc in cursor:
+                # Check if signal is from today
+                created_at = signal_doc.get('created_at')
+                if created_at:
+                    if isinstance(created_at, str):
+                        signal_dt = datetime.fromisoformat(created_at.replace('Z', ''))
+                    else:
+                        signal_dt = created_at
+                    
+                    # Convert to IST if needed
+                    if signal_dt.tzinfo is None:
+                        signal_dt_ist = IST.localize(signal_dt)
+                    else:
+                        signal_dt_ist = signal_dt.astimezone(IST)
+                    
+                    signal_date = signal_dt_ist.date()
+                    
+                    # Only include today's signals
+                    if signal_date == today_ist:
+                        signal_data = {}
+                        for key, value in signal_doc.items():
+                            if key == '_id':
+                                signal_data['_id'] = str(value)
+                            elif isinstance(value, datetime):
+                                signal_data[key] = value.isoformat()
+                            elif value is None and key in ['nifty_price', 'future_price', 'entry_price', 'stop_loss', 'target_1', 'target_2']:
+                                # Handle null price values - use entry_price as fallback or 0
+                                if key in ['nifty_price', 'future_price'] and signal_doc.get('entry_price'):
+                                    signal_data[key] = signal_doc.get('entry_price')
+                                else:
+                                    signal_data[key] = 0
+                            else:
+                                signal_data[key] = value
+                        all_signals.append(signal_data)
+            
+            # Get latest signal for display
+            if all_signals:
+                latest = all_signals[0]
+                latest_signal_json = {
+                    "symbol": latest.get("symbol"),
+                    "signal_type": latest.get("signal_type"),
+                    "confidence": latest.get("confidence"),
+                    "session_name": latest.get("session_name"),
+                    "timestamp": latest.get("timestamp")
+                }
+            
+            client.close()
+            
+        except Exception as db_error:
+            logger.warning(f"Direct database access failed: {db_error}")
+            # Include error in response for debugging
+            all_signals = [{"error": str(db_error), "debug": "database_access_failed"}]
         
         return JSONResponse(
             content={
@@ -333,7 +646,9 @@ async def get_monitoring_status():
                 "current_time_ist": current_time.isoformat(),
                 "latest_signal": latest_signal_json,
                 "service_status": "running" if is_monitoring else "stopped",
-                "timestamp": datetime.utcnow().isoformat()
+                "all_signals": all_signals,  # Include all signals here
+                "signals_count": len(all_signals),
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -440,7 +755,7 @@ async def get_chart_signals(
                     "signals_by_session": signals_by_session,
                     "total_signals": len(chart_signals),
                     "sessions_count": len(signals_by_session),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -452,7 +767,7 @@ async def get_chart_signals(
                     "timeframe": timeframe,
                     "signals": chart_signals,
                     "count": len(chart_signals),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
                 },
                 status_code=status.HTTP_200_OK
             )
@@ -498,12 +813,13 @@ async def get_signals_with_breakout_details(
                 
             signal_date = None
             
-            # Get signal timestamp and convert to IST
-            if signal.get('timestamp'):
-                if isinstance(signal['timestamp'], str):
-                    signal_dt = datetime.fromisoformat(signal['timestamp'].replace('Z', '+00:00'))
+            # Get signal timestamp - try both timestamp and created_at fields
+            signal_timestamp = signal.get('timestamp') or signal.get('created_at')
+            if signal_timestamp:
+                if isinstance(signal_timestamp, str):
+                    signal_dt = datetime.fromisoformat(signal_timestamp.replace('Z', '+00:00'))
                 else:
-                    signal_dt = signal['timestamp']
+                    signal_dt = signal_timestamp
                 
                 if signal_dt.tzinfo is None:
                     # Treat naive datetime as IST (not UTC)
@@ -596,7 +912,7 @@ async def get_signals_with_breakout_details(
                         "BUY_PUT": "Generated when both break LOW OR only one breaks HIGH"
                     }
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -645,12 +961,13 @@ async def get_signals_by_session(
         for signal in all_signals:
             signal_date = None
             
-            # Get signal timestamp and convert to IST
-            if signal.get('timestamp'):
-                if isinstance(signal['timestamp'], str):
-                    signal_dt = datetime.fromisoformat(signal['timestamp'].replace('Z', '+00:00'))
+            # Get signal timestamp - try both timestamp and created_at fields
+            signal_timestamp = signal.get('timestamp') or signal.get('created_at')
+            if signal_timestamp:
+                if isinstance(signal_timestamp, str):
+                    signal_dt = datetime.fromisoformat(signal_timestamp.replace('Z', '+00:00'))
                 else:
-                    signal_dt = signal['timestamp']
+                    signal_dt = signal_timestamp
                 
                 if signal_dt.tzinfo is None:
                     # Treat naive datetime as IST (not UTC)
@@ -719,7 +1036,7 @@ async def get_signals_by_session(
                 "sessions": sessions,
                 "session_summary": session_summary,
                 "total_signals": total_signals,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )
@@ -729,6 +1046,117 @@ async def get_signals_by_session(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve signals by session"
+        )
+
+
+@router.get("/signals/today")
+async def get_today_signals():
+    """
+    Get today's signals ONLY - filtered endpoint for current day data
+    """
+    try:
+        import pytz
+        import pymongo
+        
+        IST = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(IST)
+        today = current_time.date()
+        
+        # Direct database access
+        mongodb_url = "mongodb+srv://mail2shivap17:syqzpekjQBCc9oee@traders.w2xrjgy.mongodb.net/?retryWrites=true&w=majority&appName=traders"
+        client = pymongo.MongoClient(mongodb_url)
+        db = client['trading_signals']
+        signals_collection = db['signals']
+        
+        # Get all signals and filter by date
+        cursor = signals_collection.find().sort('created_at', -1)
+        today_signals = []
+        latest_signal_json = None
+        
+        for signal_doc in cursor:
+            # Get the signal date from created_at
+            created_at = signal_doc.get('created_at')
+            if created_at:
+                if isinstance(created_at, str):
+                    signal_dt = datetime.fromisoformat(created_at.replace('Z', ''))
+                else:
+                    signal_dt = created_at
+                
+                # Convert to IST if needed
+                if signal_dt.tzinfo is None:
+                    signal_dt_ist = IST.localize(signal_dt)
+                else:
+                    signal_dt_ist = signal_dt.astimezone(IST)
+                
+                signal_date = signal_dt_ist.date()
+                
+                # Include ONLY signals from TODAY
+                if signal_date == today:
+                    # Convert to JSON serializable format
+                    signal_data = {}
+                    for key, value in signal_doc.items():
+                        if key == '_id':
+                            signal_data['_id'] = str(value)
+                        elif isinstance(value, datetime):
+                            signal_data[key] = value.isoformat()
+                        elif value is None and key in ['nifty_price', 'future_price', 'entry_price', 'stop_loss', 'target_1', 'target_2']:
+                            # Handle null price values
+                            if key in ['nifty_price', 'future_price'] and signal_doc.get('entry_price'):
+                                signal_data[key] = signal_doc.get('entry_price')
+                            else:
+                                signal_data[key] = 0
+                        else:
+                            signal_data[key] = value
+                    today_signals.append(signal_data)
+        
+        # Get latest signal for display
+        if today_signals:
+            latest = today_signals[0]
+            latest_signal_json = {
+                "symbol": latest.get("symbol"),
+                "signal_type": latest.get("signal_type"),
+                "confidence": latest.get("confidence"),
+                "session_name": latest.get("session_name"),
+                "timestamp": latest.get("timestamp") or latest.get("created_at")
+            }
+        
+        client.close()
+        
+        # Check if in market hours
+        is_market_hours = (
+            current_time.weekday() < 5 and  # Monday-Friday
+            current_time.hour >= 9 and current_time.hour < 16  # 9 AM - 4 PM
+        )
+        
+        return JSONResponse(
+            content={
+                "date": today.isoformat(),
+                "signals": today_signals,
+                "count": len(today_signals),
+                "all_signals": today_signals,  # For compatibility with frontend
+                "latest_signal": latest_signal_json,
+                "monitoring_active": True,
+                "market_hours": is_market_hours,
+                "current_time_ist": current_time.isoformat(),
+                "service_status": "running",
+                "signals_count": len(today_signals),
+                "source": "today_only_filtered",
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting today's signals: {e}")
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "signals": [],
+                "count": 0,
+                "all_signals": [],
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_200_OK
         )
 
 
@@ -784,16 +1212,18 @@ async def get_signal_performance():
             'average_confidence': round(avg_confidence, 2),
             'last_24h_signals': len([s for s in signals 
                                    if s.get('timestamp') and 
-                                   (datetime.utcnow() - datetime.fromisoformat(
-                                       s['timestamp'].replace('Z', '+00:00') if isinstance(s['timestamp'], str) 
-                                       else s['timestamp'].isoformat()
-                                   ).replace(tzinfo=None)).total_seconds() <= 86400])
+                                   (lambda dt: (TimezoneUtils.get_ist_now() - dt.replace(tzinfo=None)).total_seconds() <= 86400)(
+                                       datetime.fromisoformat(
+                                           s['timestamp'].replace('Z', '+00:00') if isinstance(s['timestamp'], str) 
+                                           else s['timestamp'].isoformat()
+                                       )
+                                   )])
         }
         
         return JSONResponse(
             content={
                 "performance": performance_data,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
             },
             status_code=status.HTTP_200_OK
         )

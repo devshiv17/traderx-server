@@ -7,17 +7,15 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-import pytz
 from collections import defaultdict, deque
 
 from ..core.database import get_collection
+from ..core.symbols import SymbolsConfig
 from ..models.signal import SignalModel, SignalType, SignalStrength
 from .tick_data_service import tick_data_service
+from ..utils.timezone_utils import TimezoneUtils
 
 logger = logging.getLogger(__name__)
-
-# IST timezone
-IST = pytz.timezone('Asia/Kolkata')
 
 class TradingSession:
     def __init__(self, name: str, start_time: str, end_time: str):
@@ -48,11 +46,11 @@ class SignalDetectionService:
             TradingSession("Lunch Break", "11:50", "12:20")
         ]
         
-        # Symbols to monitor - CORE TRADING RULE: NIFTY 50 Index + NIFTY 50 Futures
-        self.nifty_index = "NIFTY"  # NIFTY 50 Index
-        self.nifty_futures = ["NIFTY_FUT1"]  # Primary NIFTY 50 Futures contract
+        # Symbols to monitor - using central symbols configuration
+        self.nifty_index = SymbolsConfig.NIFTY_INDEX.symbol
+        self.nifty_futures = [SymbolsConfig.NIFTY_FUTURES.symbol]
         
-        logger.info("🎯 TRADING RULE: Signal detection based on NIFTY 50 Index + NIFTY 50 Futures breakouts")
+        logger.info(f"🎯 TRADING RULE: Signal detection based on {self.nifty_index} + {self.nifty_futures[0]} breakouts")
         
         # Signal tracking
         self.active_signals = {}
@@ -81,7 +79,7 @@ class SignalDetectionService:
         self.monitoring_active = True
         
         # Reset session signal tracking for new day
-        today = datetime.now(IST).strftime('%Y-%m-%d')
+        today = TimezoneUtils.get_ist_now().strftime('%Y-%m-%d')
         self.session_signals = {}
         logger.info(f"📅 Reset session signal tracking for {today}")
         
@@ -102,11 +100,20 @@ class SignalDetectionService:
     async def _load_active_signals_from_db(self):
         """Load existing active signals from database"""
         try:
+            # Check if database connection is available
+            from ..core.database import Database
+            if Database.database is None:
+                logger.warning("Database connection not available during signal loading, skipping...")
+                return
+                
             collection = get_collection('signals')
-            # Get signals that are still active (simplified query)
+            # Get today's active signals using timezone utilities
+            today_start_ist, today_end_ist = TimezoneUtils.ist_date_range(TimezoneUtils.get_ist_now())
+            today_start_utc = TimezoneUtils.to_ist(today_start_ist)
             
             active_signals_cursor = collection.find({
-                'status': 'ACTIVE'
+                'status': 'ACTIVE',
+                'created_at': {'$gte': today_start_utc}
             }).sort('created_at', -1).limit(50)
             
             signals = await active_signals_cursor.to_list(100)
@@ -174,7 +181,7 @@ class SignalDetectionService:
         """Main monitoring loop"""
         while self.monitoring_active:
             try:
-                current_time = datetime.now(IST)
+                current_time = TimezoneUtils.get_ist_now()
                 
                 # Only monitor during market hours (9:15 AM - 3:30 PM IST)
                 if not self._is_market_hours(current_time):
@@ -202,15 +209,17 @@ class SignalDetectionService:
     async def _process_historical_sessions(self):
         """Process sessions that may have already passed today"""
         try:
-            current_time = datetime.now(IST)
+            current_time = TimezoneUtils.get_ist_now()
             logger.info(f"🕐 Current time: {current_time.strftime('%H:%M:%S')}")
             
             for session in self.sessions:
-                session_start_time = datetime.strptime(session.start_time, "%H:%M").replace(
-                    year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=IST
+                # Use timezone utils for session time creation
+                session_date = current_time.date()
+                session_start_time = TimezoneUtils.to_ist(
+                    datetime.combine(session_date, datetime.strptime(session.start_time, "%H:%M").time())
                 )
-                session_end_time = datetime.strptime(session.end_time, "%H:%M").replace(
-                    year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=IST
+                session_end_time = TimezoneUtils.to_ist(
+                    datetime.combine(session_date, datetime.strptime(session.end_time, "%H:%M").time())
                 )
                 
                 logger.info(f"📅 Session {session.name}: {session_start_time.strftime('%H:%M')} - {session_end_time.strftime('%H:%M')}, Completed: {session.is_completed}")
@@ -288,15 +297,8 @@ class SignalDetectionService:
             logger.error(f"Full traceback: {traceback.format_exc()}")
     
     def _is_market_hours(self, current_time: datetime) -> bool:
-        """Check if current time is within market hours"""
-        # Market hours: 9:15 AM - 3:30 PM IST, Monday-Friday
-        if current_time.weekday() >= 5:  # Weekend
-            return False
-        
-        market_start = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_end = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
-        
-        return market_start <= current_time <= market_end
+        """Check if current time is within market hours using timezone utils"""
+        return TimezoneUtils.is_market_hours(current_time)
     
     async def _process_current_candle(self, current_time: datetime):
         """Process current 5-minute candle data"""
@@ -306,9 +308,9 @@ class SignalDetectionService:
             candle_start = current_time.replace(minute=candle_minute, second=0, microsecond=0)
             candle_end = candle_start + timedelta(minutes=5)
             
-            # Convert to naive datetime for database queries (remove timezone info)
-            candle_start_naive = candle_start.replace(tzinfo=None)
-            candle_end_naive = candle_end.replace(tzinfo=None)
+            # Convert to naive IST for database queries
+            candle_start_naive = TimezoneUtils.to_ist(candle_start)
+            candle_end_naive = TimezoneUtils.to_ist(candle_end)
             
             # Skip if we've already processed this candle
             if self.last_processed_time and candle_start <= self.last_processed_time:
@@ -444,18 +446,42 @@ class SignalDetectionService:
             
             logger.debug(f"🎯 Checking breakout: NIFTY Index @ ₹{nifty_index_price:.2f}, NIFTY Futures @ ₹{nifty_futures_price:.2f}")
             
-            # Get NIFTY Index session levels
-            nifty_index_session_high = session.session_data.get(self.nifty_index, {}).get('high')
-            nifty_index_session_low = session.session_data.get(self.nifty_index, {}).get('low')
+            # Get NIFTY Index session levels with string parsing fix
+            nifty_session_data = session.session_data.get(self.nifty_index, {})
+            
+            # CRITICAL FIX: Handle string representation of session data
+            if isinstance(nifty_session_data, str):
+                try:
+                    import ast
+                    nifty_session_data = ast.literal_eval(nifty_session_data)
+                    logger.debug(f"📊 Parsed NIFTY session data from string")
+                except Exception as e:
+                    logger.error(f"Failed to parse NIFTY session data string: {e}")
+                    return
+            
+            nifty_index_session_high = nifty_session_data.get('high') if isinstance(nifty_session_data, dict) else None
+            nifty_index_session_low = nifty_session_data.get('low') if isinstance(nifty_session_data, dict) else None
             
             if not nifty_index_session_high or not nifty_index_session_low:
-                logger.debug(f"No session data for NIFTY Index in session {session.name}")
+                logger.debug(f"No valid session data for NIFTY Index in session {session.name}")
                 return
             
-            # Get NIFTY Futures session levels
+            # Get NIFTY Futures session levels with string parsing fix
             futures_symbol = self.nifty_futures[0]
-            futures_session_high = session.session_data.get(futures_symbol, {}).get('high')
-            futures_session_low = session.session_data.get(futures_symbol, {}).get('low')
+            futures_session_data = session.session_data.get(futures_symbol, {})
+            
+            # CRITICAL FIX: Handle string representation of futures session data
+            if isinstance(futures_session_data, str):
+                try:
+                    import ast
+                    futures_session_data = ast.literal_eval(futures_session_data)
+                    logger.debug(f"📊 Parsed {futures_symbol} session data from string")
+                except Exception as e:
+                    logger.error(f"Failed to parse {futures_symbol} session data string: {e}")
+                    futures_session_data = {}
+            
+            futures_session_high = futures_session_data.get('high') if isinstance(futures_session_data, dict) else None
+            futures_session_low = futures_session_data.get('low') if isinstance(futures_session_data, dict) else None
             
             # CRITICAL: If futures session data is missing, use NIFTY Index session data as proxy
             # This ensures signal detection continues even if we don't have separate futures data
@@ -565,8 +591,10 @@ class SignalDetectionService:
             if symbol not in self.price_data or len(self.price_data[symbol]) < 5:
                 return None
             
-            # Get today's data starting from 9:15 AM (IST)
-            today_start = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0, tzinfo=None)
+            # Get today's market open time in IST
+            today_ist = TimezoneUtils.get_ist_now()
+            market_open_ist, _ = TimezoneUtils.ist_market_hours(today_ist)
+            today_start = market_open_ist
             
             total_volume = 0
             total_price_volume = 0
@@ -602,6 +630,19 @@ class SignalDetectionService:
             current_nifty_volume = nifty_volumes[-1] if nifty_volumes else 0
             current_future_volume = future_volumes[-1] if future_volumes else 0
             
+            # CRITICAL FIX: Handle zero volume in tick data (common in testing/some data feeds)
+            # If we have price data but zero volume, check if we have tick count instead
+            has_tick_data = (nifty_symbol in self.price_data and len(self.price_data[nifty_symbol]) > 0)
+            
+            if has_tick_data:
+                recent_candles = list(self.price_data[nifty_symbol])[-5:]
+                total_tick_count = sum(candle.get('tick_count', 0) for candle in recent_candles)
+                
+                # If we have tick data (tick_count > 0) but zero volume, allow the signal
+                if total_tick_count > 0:
+                    logger.debug(f"Volume confirmation: Zero volume but {total_tick_count} ticks - allowing signal")
+                    return True
+            
             # Calculate average volume of previous candles
             avg_nifty_volume = sum(nifty_volumes[:-1]) / len(nifty_volumes[:-1]) if len(nifty_volumes) > 1 else 0
             avg_future_volume = sum(future_volumes[:-1]) / len(future_volumes[:-1]) if len(future_volumes) > 1 else 0
@@ -613,6 +654,10 @@ class SignalDetectionService:
                 current_nifty_volume >= avg_nifty_volume * 0.8 and
                 current_future_volume >= avg_future_volume * 0.8
             )
+            
+            # Log volume check details for debugging
+            if not volume_ok:
+                logger.debug(f"Volume check failed: Current({current_nifty_volume}, {current_future_volume}) vs Min({self.min_volume_threshold})")
             
             return volume_ok
             
@@ -717,13 +762,21 @@ class SignalDetectionService:
             elif future_breaks_low and future_session_low:
                 breakout_status['future_breakout_amount'] = round(future_session_low - future_price, 2)
             
-            # Create enhanced signal object
+            # Get additional futures data for enhanced storage
+            future_candle_data = await self._get_latest_candle_data(future_symbol)
+            nifty_candle_data = await self._get_latest_candle_data(self.nifty_index)
+            
+            # Calculate market sentiment and correlation
+            market_sentiment = self._determine_market_sentiment(nifty_price, future_price, nifty_session_high, nifty_session_low)
+            correlation_score = await self._calculate_correlation_score(self.nifty_index, future_symbol)
+            
+            # Create enhanced signal object with comprehensive futures data
             signal_data = {
                 'id': signal_id,
                 'session_name': session.name,
                 'signal_type': signal_type,
                 'reason': reason,
-                'timestamp': timestamp.replace(tzinfo=None) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp,
+                'timestamp': TimezoneUtils.to_ist(timestamp),
                 'nifty_price': nifty_price,
                 'future_price': future_price,
                 'future_symbol': future_symbol,
@@ -740,7 +793,27 @@ class SignalDetectionService:
                 'vwap_nifty': await self._calculate_vwap(self.nifty_index),
                 'vwap_future': await self._calculate_vwap(future_symbol),
                 'breakout_details': breakout_status,
-                'display_text': self._create_signal_display_text(signal_type, breakout_status, session.name)
+                'display_text': self._create_signal_display_text(signal_type, breakout_status, session.name),
+                
+                # Enhanced futures data fields
+                'future_open': future_candle_data.get('open') if future_candle_data else None,
+                'future_close': future_candle_data.get('close') if future_candle_data else None,
+                'future_volume': future_candle_data.get('volume') if future_candle_data else None,
+                'future_change': round(future_price - future_candle_data.get('open', future_price), 2) if future_candle_data else None,
+                'future_change_percent': round(((future_price - future_candle_data.get('open', future_price)) / future_candle_data.get('open', future_price)) * 100, 2) if future_candle_data and future_candle_data.get('open') else None,
+                
+                # Breakout details for both index and futures
+                'nifty_breakout_amount': breakout_status['nifty_breakout_amount'],
+                'future_breakout_amount': breakout_status['future_breakout_amount'],
+                'nifty_breaks_high': breakout_status['nifty_breaks_high'],
+                'nifty_breaks_low': breakout_status['nifty_breaks_low'],
+                'future_breaks_high': breakout_status['future_breaks_high'],
+                'future_breaks_low': breakout_status['future_breaks_low'],
+                
+                # Additional market data
+                'market_sentiment': market_sentiment,
+                'volatility_index': await self._get_volatility_index(),
+                'correlation_score': correlation_score
             }
             
             # Track this signal for the session - allowing multiple different breakouts
@@ -792,7 +865,7 @@ class SignalDetectionService:
             collection = get_collection('signals')
             await collection.update_one(
                 {'id': signal_id},
-                {'$set': {'status': 'REPLACED', 'updated_at': datetime.now(IST).replace(tzinfo=None)}}
+                {'$set': {'status': 'REPLACED', 'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())}}
             )
             
             logger.info(f"🔄 Deactivated signal: {signal_id}")
@@ -857,7 +930,7 @@ class SignalDetectionService:
                 confidence += 15
             
             # Time of day factor (higher confidence during active trading hours)
-            current_hour = datetime.now(IST).hour
+            current_hour = TimezoneUtils.get_ist_now().hour
             if 10 <= current_hour <= 14:  # Peak trading hours
                 confidence += 10
             
@@ -921,8 +994,8 @@ class SignalDetectionService:
             # Prepare document for insertion
             signal_doc = {
                 **signal_data,
-                'created_at': datetime.now(IST).replace(tzinfo=None),
-                'updated_at': datetime.now(IST).replace(tzinfo=None)
+                'created_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now()),
+                'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())
             }
             
             # Try to insert the signal
@@ -952,13 +1025,14 @@ class SignalDetectionService:
         """Clean up old signals that are no longer relevant"""
         try:
             # Remove signals older than 4 hours from in-memory storage
-            cutoff_time = current_time - timedelta(hours=4)
+            cutoff_time_ist = current_time - timedelta(hours=4)
+            cutoff_time = cutoff_time_ist
             
             # Clean up active signals
             expired_signal_ids = []
             for signal_id, signal in self.active_signals.items():
                 if (signal.get('timestamp') and 
-                    signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    signal.get('timestamp') < cutoff_time):
                     expired_signal_ids.append(signal_id)
             
             for signal_id in expired_signal_ids:
@@ -969,7 +1043,7 @@ class SignalDetectionService:
             expired_session_keys = []
             for session_key, session_signal in self.session_signals.items():
                 if (session_signal.get('timestamp') and 
-                    session_signal.get('timestamp') < cutoff_time.replace(tzinfo=None)):
+                    session_signal.get('timestamp') < cutoff_time):
                     expired_session_keys.append(session_key)
             
             for session_key in expired_session_keys:
@@ -987,7 +1061,7 @@ class SignalDetectionService:
                     {
                         '$set': {
                             'status': 'EXPIRED',
-                            'updated_at': datetime.now(IST).replace(tzinfo=None)
+                            'updated_at': TimezoneUtils.to_ist(TimezoneUtils.get_ist_now())
                         }
                     }
                 )
@@ -1014,6 +1088,106 @@ class SignalDetectionService:
         except Exception as e:
             logger.error(f"Error updating technical indicators: {e}")
     
+    async def _get_latest_candle_data(self, symbol: str) -> Optional[Dict]:
+        """Get the latest candle data for a symbol"""
+        try:
+            if symbol in self.price_data and self.price_data[symbol]:
+                return self.price_data[symbol][-1]
+            return None
+        except Exception as e:
+            logger.error(f"Error getting latest candle data for {symbol}: {e}")
+            return None
+    
+    def _determine_market_sentiment(self, nifty_price: float, future_price: float, session_high: float, session_low: float) -> str:
+        """Determine overall market sentiment based on price movements"""
+        try:
+            if not all([nifty_price, future_price, session_high, session_low]):
+                return "NEUTRAL"
+            
+            session_mid = (session_high + session_low) / 2
+            
+            # Check if both are above/below session midpoint
+            if nifty_price > session_mid and future_price > session_mid:
+                if nifty_price > session_high and future_price > session_high:
+                    return "VERY_BULLISH"
+                return "BULLISH"
+            elif nifty_price < session_mid and future_price < session_mid:
+                if nifty_price < session_low and future_price < session_low:
+                    return "VERY_BEARISH"
+                return "BEARISH"
+            else:
+                return "NEUTRAL"
+        except Exception as e:
+            logger.error(f"Error determining market sentiment: {e}")
+            return "NEUTRAL"
+    
+    async def _calculate_correlation_score(self, nifty_symbol: str, future_symbol: str) -> Optional[float]:
+        """Calculate correlation between Nifty index and futures movements"""
+        try:
+            if (nifty_symbol not in self.price_data or future_symbol not in self.price_data or
+                len(self.price_data[nifty_symbol]) < 10 or len(self.price_data[future_symbol]) < 10):
+                return None
+            
+            # Get recent price movements
+            nifty_prices = [candle['close'] for candle in list(self.price_data[nifty_symbol])[-10:]]
+            future_prices = [candle['close'] for candle in list(self.price_data[future_symbol])[-10:]]
+            
+            if len(nifty_prices) != len(future_prices):
+                return None
+            
+            # Calculate correlation coefficient
+            import statistics
+            
+            nifty_mean = statistics.mean(nifty_prices)
+            future_mean = statistics.mean(future_prices)
+            
+            numerator = sum((n - nifty_mean) * (f - future_mean) for n, f in zip(nifty_prices, future_prices))
+            nifty_sq_sum = sum((n - nifty_mean) ** 2 for n in nifty_prices)
+            future_sq_sum = sum((f - future_mean) ** 2 for f in future_prices)
+            
+            denominator = (nifty_sq_sum * future_sq_sum) ** 0.5
+            
+            if denominator == 0:
+                return None
+            
+            correlation = numerator / denominator
+            return round(correlation, 3)
+            
+        except Exception as e:
+            logger.error(f"Error calculating correlation score: {e}")
+            return None
+    
+    async def _get_volatility_index(self) -> Optional[float]:
+        """Get volatility index (VIX equivalent) - simplified calculation"""
+        try:
+            if (self.nifty_index not in self.price_data or 
+                len(self.price_data[self.nifty_index]) < 20):
+                return None
+            
+            # Calculate simple volatility based on recent price movements
+            recent_prices = [candle['close'] for candle in list(self.price_data[self.nifty_index])[-20:]]
+            
+            if len(recent_prices) < 2:
+                return None
+            
+            # Calculate price changes
+            price_changes = []
+            for i in range(1, len(recent_prices)):
+                change_pct = (recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1]
+                price_changes.append(change_pct)
+            
+            # Calculate standard deviation as volatility measure
+            import statistics
+            if len(price_changes) > 1:
+                volatility = statistics.stdev(price_changes) * 100  # Convert to percentage
+                return round(volatility, 2)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating volatility index: {e}")
+            return None
+    
     # Public API methods
     
     async def get_active_signals(self) -> List[Dict]:
@@ -1023,6 +1197,12 @@ class SignalDetectionService:
     async def get_signal_history(self, limit: int = 50) -> List[Dict]:
         """Get signal history from database and in-memory"""
         try:
+            # Check if database connection is available
+            from ..core.database import Database
+            if Database.database is None:
+                logger.warning("Database connection not available, using in-memory signals only")
+                return self.signal_history[-limit:] if self.signal_history else []
+            
             signals_collection = get_collection('signals')
             
             # Get signals from database
@@ -1056,6 +1236,8 @@ class SignalDetectionService:
                 }
                 db_signals.append(signal_data)
             
+            logger.info(f"Retrieved {len(db_signals)} signals from database")
+            
             # Combine with in-memory signals (avoid duplicates)
             all_signals = list(db_signals)
             for mem_signal in self.signal_history:
@@ -1066,24 +1248,45 @@ class SignalDetectionService:
             all_signals.sort(key=lambda x: x.get('created_at') or x.get('timestamp') or datetime.min, reverse=True)
             return all_signals[:limit]
             
+        except RuntimeError as re:
+            logger.warning(f"Database connection error: {re}")
+            # Return in-memory signals if database is not available
+            return self.signal_history[-limit:] if self.signal_history else []
         except Exception as e:
             logger.error(f"Error getting signal history from database: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             # Fallback to in-memory
-            return self.signal_history[-limit:]
+            return self.signal_history[-limit:] if self.signal_history else []
     
     async def get_session_status(self) -> List[Dict]:
         """Get current session status"""
-        current_time = datetime.now(IST)
+        current_time = TimezoneUtils.get_ist_now()
         session_status = []
         
         for session in self.sessions:
+            # Clean session_data to ensure JSON serializability
+            clean_session_data = {}
+            if session.session_data:
+                for key, value in session.session_data.items():
+                    if isinstance(value, datetime):
+                        clean_session_data[key] = value.isoformat()
+                    elif hasattr(value, 'isoformat'):  # datetime-like objects
+                        clean_session_data[key] = value.isoformat()
+                    elif isinstance(value, (str, int, float, bool, type(None))):
+                        clean_session_data[key] = value
+                    else:
+                        clean_session_data[key] = str(value)
+            
             status = {
                 'name': session.name,
                 'start_time': session.start_time,
                 'end_time': session.end_time,
                 'is_active': session.is_active,
                 'is_completed': session.is_completed,
-                'session_data': session.session_data
+                'session_data': clean_session_data,
+                'high': session.high,
+                'low': session.low
             }
             session_status.append(status)
         
