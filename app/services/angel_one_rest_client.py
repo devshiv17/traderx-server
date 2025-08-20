@@ -121,14 +121,8 @@ class AngelOneRestClient:
         # This is a mapping of common symbols to Angel One tokens
         # You'll need to get the correct token mapping from Angel One
         symbol_to_token = {
-            "NIFTY": "26009",
-            "BANKNIFTY": "26017", 
-            "FINNIFTY": "26037",
-            "SENSEX": "1",
-            "RELIANCE": "2885",
-            "TCS": "11536",
-            "HDFC": "1330",
-            "INFY": "1594"
+            "NIFTY": "99926000",           # NIFTY Index
+            "NIFTY28AUG25FUT": "64103"     # NIFTY Futures
         }
         
         tokens = []

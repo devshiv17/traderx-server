@@ -244,17 +244,9 @@ class AngelOneService:
                 logger.warning("📊 No futures found through search - trying known NIFTY futures tokens...")
                 
                 # Try current month NIFTY futures tokens - Aug 2025
-                # These tokens are for current month (August 2025) based on master contract
+                # Only NIFTY futures for focused trading strategy
                 known_futures_tokens = [
-                    # August 2025 NIFTY futures (current month) - CORRECT TOKENS
-                    "64103",    # NIFTY28AUG25FUT - Verified from master contract
-                    # Additional August futures for diversified trading
-                    "64100",    # BANKNIFTY28AUG25FUT
-                    "64101",    # FINNIFTY28AUG25FUT
-                    "64102",    # MIDCPNIFTY28AUG25FUT
-                    # Fallback tokens (kept for compatibility)
-                    "67329",    # Old token - may be outdated
-                    "67330",    # Old token - may be outdated
+                    "64103",    # NIFTY28AUG25FUT - Only NIFTY futures needed
                 ]
                 logger.info(f"Trying {len(known_futures_tokens)} known NIFTY futures tokens for August 2025...")
                 
@@ -682,8 +674,8 @@ class AngelOneService:
         try:
             collection = get_collection('tick_data')
             
-            # Create unique identifier to prevent duplicates
-            tick_data['_id'] = f"{tick_data['symbol']}_{tick_data['timestamp']}"
+            # Create unique identifier to prevent duplicates using received_at
+            tick_data['_id'] = f"{tick_data['symbol']}_{tick_data['received_at']}"
             
             # Use upsert to avoid duplicates
             result = await collection.replace_one(
@@ -1031,7 +1023,7 @@ class AngelOneService:
                 query['symbol'] = symbol
             
             # Get latest data
-            cursor = collection.find(query).sort('timestamp', -1).limit(limit)
+            cursor = collection.find(query).sort('received_at', -1).limit(limit)
             data = await cursor.to_list(length=limit)
             
             # Convert ObjectId to string for JSON serialization

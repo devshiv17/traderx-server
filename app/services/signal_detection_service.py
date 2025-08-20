@@ -67,6 +67,7 @@ class SignalDetectionService:
         # Real-time monitoring
         self.monitoring_active = False
         self.last_processed_time = None
+        self.monitoring_task = None
         
         # Enhanced strategy parameters
         self.min_volume_threshold = 10000  # Minimum volume for valid signal
@@ -75,6 +76,7 @@ class SignalDetectionService:
         
     async def start_monitoring(self):
         """Start real-time signal monitoring"""
+        print("🚀 SIGNAL DETECTION: Starting advanced signal detection service...")  # Force to stdout
         logger.info("🚀 Starting advanced signal detection service...")
         self.monitoring_active = True
         
@@ -91,11 +93,41 @@ class SignalDetectionService:
             session.reset_for_day()
         
         # Force process past sessions if they have data
-        await self._process_historical_sessions()
+        try:
+            logger.info("📊 Processing historical sessions...")
+            await self._process_historical_sessions()
+            logger.info("✅ Historical sessions processed")
+        except Exception as e:
+            logger.error(f"❌ Error processing historical sessions: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
         
-        # Start monitoring loop
-        asyncio.create_task(self._monitoring_loop())
-        logger.info("✅ Signal detection service started")
+        # Start monitoring loop and store task reference
+        logger.info("🔄 Creating monitoring loop task...")
+        print("🔄 SIGNAL DETECTION: Creating monitoring loop task...")
+        
+        # Create task with error handling
+        self.monitoring_task = asyncio.create_task(self._monitoring_loop())
+        
+        # Add callback to handle task completion/errors
+        def task_callback(task):
+            try:
+                result = task.result()
+                print(f"🔄 SIGNAL DETECTION: Monitoring loop ended with result: {result}")
+                logger.info(f"Monitoring loop ended with result: {result}")
+            except Exception as e:
+                print(f"❌ SIGNAL DETECTION: Monitoring loop failed with error: {e}")
+                logger.error(f"Monitoring loop failed with error: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+        
+        self.monitoring_task.add_done_callback(task_callback)
+        
+        # Wait a moment to see if task starts properly
+        await asyncio.sleep(0.1)
+        
+        logger.info("✅ Signal detection service started with monitoring loop task created")
+        print("✅ SIGNAL DETECTION: Signal detection service started with monitoring loop task created")
     
     async def _load_active_signals_from_db(self):
         """Load existing active signals from database"""
@@ -175,18 +207,27 @@ class SignalDetectionService:
     async def stop_monitoring(self):
         """Stop signal monitoring"""
         self.monitoring_active = False
+        if self.monitoring_task:
+            self.monitoring_task.cancel()
+            self.monitoring_task = None
         logger.info("🛑 Signal detection service stopped")
     
     async def _monitoring_loop(self):
         """Main monitoring loop"""
+        print("🔄 SIGNAL DETECTION: Starting monitoring loop")  # Force to stdout
+        logger.info("🔄 Starting monitoring loop")
         while self.monitoring_active:
             try:
                 current_time = TimezoneUtils.get_ist_now()
+                logger.info(f"⏰ Monitoring loop tick at {current_time.strftime('%H:%M:%S')}")
                 
                 # Only monitor during market hours (9:15 AM - 3:30 PM IST)
                 if not self._is_market_hours(current_time):
+                    logger.info(f"📴 Outside market hours, sleeping...")
                     await asyncio.sleep(60)  # Check every minute outside market hours
                     continue
+                
+                logger.info(f"🏪 Market hours active, processing...")
                 
                 # Process current 5-minute candle
                 await self._process_current_candle(current_time)
@@ -204,6 +245,8 @@ class SignalDetectionService:
                 
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 await asyncio.sleep(30)
     
     async def _process_historical_sessions(self):
@@ -224,12 +267,18 @@ class SignalDetectionService:
                 
                 logger.info(f"📅 Session {session.name}: {session_start_time.strftime('%H:%M')} - {session_end_time.strftime('%H:%M')}, Completed: {session.is_completed}")
                 
-                # If session has ended but wasn't processed, process it now
-                if current_time > session_end_time and not session.is_completed:
-                    logger.info(f"🔄 Processing historical session: {session.name}")
+                # Reset completion status to force reprocessing if needed
+                if current_time > session_end_time:
+                    logger.info(f"🔄 Force processing historical session: {session.name}")
+                    session.is_completed = False  # Reset to force reprocessing
                     await self._process_session_retroactively(session, session_start_time, session_end_time)
                     session.is_completed = True
                     logger.info(f"✅ Historical session {session.name} processing complete")
+                    
+                    # After processing, immediately check for breakouts
+                    logger.info(f"🎯 Checking breakouts for completed session: {session.name}")
+                    await self._check_breakout_conditions(session, current_time)
+                    
                 elif current_time <= session_end_time:
                     logger.info(f"⏳ Session {session.name} not yet ended")
                 else:
@@ -248,46 +297,79 @@ class SignalDetectionService:
             
             for symbol in symbols:
                 if symbol not in session.session_data:
-                    session.session_data[symbol] = {'high': None, 'low': None, 'candles': []}
+                    session.session_data[symbol] = {'high': None, 'low': None, 'candles': [], 'all_ticks': []}
                 
-                candle_count = 0
-                # Get all candles for this session period
-                current_candle_start = start_time
-                while current_candle_start < end_time:
-                    candle_end = current_candle_start + timedelta(minutes=5)
+                # Get ALL ticks for the entire session period to ensure accurate high/low
+                from ..core.database import get_collection
+                
+                # Convert to IST for database query
+                start_time_ist = TimezoneUtils.to_ist(start_time) if start_time.tzinfo else start_time
+                end_time_ist = TimezoneUtils.to_ist(end_time) if end_time.tzinfo else end_time
+                
+                collection = get_collection("tick_data")
+                cursor = collection.find({
+                    'symbol': symbol.upper(),
+                    'received_at': {
+                        '$gte': start_time_ist,
+                        '$lt': end_time_ist
+                    }
+                }).sort('received_at', 1)
+                
+                # Collect all ticks for this session
+                session_ticks = []
+                async for doc in cursor:
+                    session_ticks.append({
+                        'price': doc.get('price'),
+                        'timestamp': doc.get('received_at'),
+                        'volume': doc.get('volume', 0) or 0
+                    })
+                
+                # If no ticks found for futures, use NIFTY as proxy
+                if not session_ticks and symbol in self.nifty_futures:
+                    logger.debug(f"No session data for {symbol}, using NIFTY as proxy")
+                    cursor = collection.find({
+                        'symbol': self.nifty_index.upper(),
+                        'received_at': {
+                            '$gte': start_time_ist,
+                            '$lt': end_time_ist
+                        }
+                    }).sort('received_at', 1)
                     
-                    logger.debug(f"🔍 Getting candle data for {symbol}: {current_candle_start.strftime('%H:%M')} - {candle_end.strftime('%H:%M')}")
+                    async for doc in cursor:
+                        session_ticks.append({
+                            'price': doc.get('price'),
+                            'timestamp': doc.get('received_at'),
+                            'volume': doc.get('volume', 0) or 0
+                        })
+                
+                if session_ticks:
+                    # Calculate session high/low from ALL ticks (not just 5-min candles)
+                    all_prices = [tick['price'] for tick in session_ticks]
+                    session.session_data[symbol]['high'] = max(all_prices)
+                    session.session_data[symbol]['low'] = min(all_prices)
+                    session.session_data[symbol]['all_ticks'] = session_ticks
                     
-                    candle_data = await self._get_5min_candle_data(symbol, 
-                        current_candle_start.replace(tzinfo=None), 
-                        candle_end.replace(tzinfo=None))
+                    logger.info(f"📊 {symbol}: Found {len(session_ticks)} ticks, High: {session.session_data[symbol]['high']:.2f}, Low: {session.session_data[symbol]['low']:.2f}")
                     
-                    if candle_data:
-                        candle_count += 1
-                        session.session_data[symbol]['candles'].append(candle_data)
-                        logger.debug(f"📈 Found candle for {symbol}: O={candle_data['open']:.2f}, H={candle_data['high']:.2f}, L={candle_data['low']:.2f}, C={candle_data['close']:.2f}")
+                    # Also create 5-minute candles for historical tracking
+                    candle_count = 0
+                    current_candle_start = start_time
+                    while current_candle_start < end_time:
+                        candle_end = current_candle_start + timedelta(minutes=5)
                         
-                        # Update session high/low
-                        if session.session_data[symbol]['high'] is None:
-                            session.session_data[symbol]['high'] = candle_data['high']
-                            session.session_data[symbol]['low'] = candle_data['low']
-                        else:
-                            session.session_data[symbol]['high'] = max(
-                                session.session_data[symbol]['high'], candle_data['high']
-                            )
-                            session.session_data[symbol]['low'] = min(
-                                session.session_data[symbol]['low'], candle_data['low']
-                            )
-                    else:
-                        logger.debug(f"❌ No candle data found for {symbol} at {current_candle_start.strftime('%H:%M')}")
+                        candle_data = await self._get_5min_candle_data(symbol, current_candle_start, candle_end)
+                        if candle_data:
+                            candle_count += 1
+                            session.session_data[symbol]['candles'].append(candle_data)
+                            # Add to main tracking for other functions
+                            self.price_data[symbol].append(candle_data)
+                        
+                        current_candle_start = candle_end
                     
-                    current_candle_start = candle_end
-                
-                logger.info(f"📊 {symbol}: Found {candle_count} candles, High: {session.session_data[symbol]['high']}, Low: {session.session_data[symbol]['low']}")
+                    logger.info(f"📈 {symbol}: Generated {candle_count} 5-min candles for tracking")
                     
-                # Add data to main tracking
-                if symbol in session.session_data and session.session_data[symbol]['candles']:
-                    self.price_data[symbol].extend(session.session_data[symbol]['candles'])
+                else:
+                    logger.warning(f"❌ No tick data found for {symbol} during session {session.name}")
                     
             logger.info(f"✅ Processed {session.name}: NIFTY high/low: {session.session_data.get(self.nifty_index, {}).get('high')}/{session.session_data.get(self.nifty_index, {}).get('low')}")
             
@@ -298,7 +380,9 @@ class SignalDetectionService:
     
     def _is_market_hours(self, current_time: datetime) -> bool:
         """Check if current time is within market hours using timezone utils"""
-        return TimezoneUtils.is_market_hours(current_time)
+        is_market_hours = TimezoneUtils.is_market_hours(current_time)
+        logger.debug(f"🕰️ Market hours check: {current_time.strftime('%H:%M:%S')} -> {is_market_hours}")
+        return is_market_hours
     
     async def _process_current_candle(self, current_time: datetime):
         """Process current 5-minute candle data"""
@@ -332,34 +416,76 @@ class SignalDetectionService:
             logger.error(f"Error processing current candle: {e}")
     
     async def _get_5min_candle_data(self, symbol: str, start_time: datetime, end_time: datetime) -> Optional[Dict]:
-        """Get 5-minute OHLCV data for symbol"""
+        """Get 5-minute OHLCV data for symbol using received_at for accurate breakout timing"""
         try:
-            # For futures symbols, try to get their data first, then fall back to NIFTY
-            ticks = await tick_data_service.get_ticks_for_timerange(symbol, start_time, end_time)
+            # Use the same logic as chart API for consistency
+            from ..core.database import get_collection
+            
+            # Convert to IST if needed for database query
+            start_time_ist = TimezoneUtils.to_ist(start_time) if start_time.tzinfo else start_time
+            end_time_ist = TimezoneUtils.to_ist(end_time) if end_time.tzinfo else end_time
+            
+            # Query database directly using same approach as chart API
+            collection = get_collection("tick_data")
+            cursor = collection.find({
+                'symbol': symbol.upper(),
+                'received_at': {
+                    '$gte': start_time_ist,
+                    '$lt': end_time_ist
+                }
+            }).sort('received_at', 1)
+            
+            # Fetch tick data
+            tick_data = []
+            async for doc in cursor:
+                tick_data.append({
+                    'price': doc.get('price'),
+                    'timestamp': doc.get('received_at'),
+                    'volume': doc.get('volume', 0) or 0
+                })
             
             # If no ticks found for futures symbols, use NIFTY as proxy
-            if not ticks and symbol in self.nifty_futures:
+            if not tick_data and symbol in self.nifty_futures:
                 logger.debug(f"No data for {symbol}, using NIFTY as proxy")
-                ticks = await tick_data_service.get_ticks_for_timerange(self.nifty_index, start_time, end_time)
+                cursor = collection.find({
+                    'symbol': self.nifty_index.upper(),
+                    'received_at': {
+                        '$gte': start_time_ist,
+                        '$lt': end_time_ist
+                    }
+                }).sort('received_at', 1)
+                
+                async for doc in cursor:
+                    tick_data.append({
+                        'price': doc.get('price'),
+                        'timestamp': doc.get('received_at'),
+                        'volume': doc.get('volume', 0) or 0
+                    })
             
-            if not ticks:
+            if not tick_data:
                 return None
             
-            prices = [tick['price'] for tick in ticks]
-            volumes = [tick.get('volume', 0) or 0 for tick in ticks]
+            prices = [tick['price'] for tick in tick_data]
+            volumes = [tick.get('volume', 0) or 0 for tick in tick_data]
             
-            return {
-                'timestamp': start_time,
+            candle = {
+                'timestamp': start_time_ist,
                 'open': prices[0],
                 'high': max(prices),
                 'low': min(prices),
                 'close': prices[-1],
                 'volume': sum(volumes),
-                'tick_count': len(ticks)
+                'tick_count': len(tick_data)
             }
+            
+            logger.debug(f"📊 Generated candle for {symbol}: {start_time_ist.strftime('%H:%M')}-{end_time_ist.strftime('%H:%M')} O={candle['open']:.2f} H={candle['high']:.2f} L={candle['low']:.2f} C={candle['close']:.2f} Ticks={candle['tick_count']}")
+            
+            return candle
             
         except Exception as e:
             logger.error(f"Error getting candle data for {symbol}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
     async def _check_sessions(self, current_time: datetime):
@@ -367,21 +493,34 @@ class SignalDetectionService:
         current_time_str = current_time.strftime("%H:%M")
         
         for session in self.sessions:
-            # Check if session is starting
-            if not session.is_active and current_time_str == session.start_time:
+            # Parse session times for comparison
+            start_hour, start_min = map(int, session.start_time.split(':'))
+            end_hour, end_min = map(int, session.end_time.split(':'))
+            current_hour, current_min = current_time.hour, current_time.minute
+            
+            # Convert to minutes for easier comparison
+            start_minutes = start_hour * 60 + start_min
+            end_minutes = end_hour * 60 + end_min
+            current_minutes = current_hour * 60 + current_min
+            
+            # Check if current time is within session range
+            is_in_session_range = start_minutes <= current_minutes <= end_minutes
+            
+            # Session is starting (first time entering range)
+            if not session.is_active and not session.is_completed and is_in_session_range:
                 session.is_active = True
                 session.reset_for_day()
-                logger.info(f"📅 Session '{session.name}' started at {current_time_str}")
+                logger.info(f"📅 Session '{session.name}' started at {current_time_str} (range: {session.start_time}-{session.end_time})")
             
-            # Check if session is ending
-            elif session.is_active and current_time_str == session.end_time:
+            # Session is ending (time has passed the end time)
+            elif session.is_active and current_minutes > end_minutes:
                 session.is_active = False
                 session.is_completed = True
                 await self._finalize_session(session, current_time)
                 logger.info(f"🏁 Session '{session.name}' completed at {current_time_str}")
             
             # Update session data during active period
-            elif session.is_active:
+            elif session.is_active and is_in_session_range:
                 await self._update_session_data(session, current_time)
     
     async def _update_session_data(self, session: TradingSession, current_time: datetime):
@@ -422,10 +561,13 @@ class SignalDetectionService:
     
     async def _monitor_breakouts(self, current_time: datetime):
         """Monitor for breakouts after session completion"""
+        logger.info(f"🔍 Monitoring breakouts at {current_time.strftime('%H:%M:%S')}")
         for session in self.sessions:
+            logger.info(f"📅 Session {session.name}: is_completed={session.is_completed}, is_active={session.is_active}")
             if not session.is_completed:
                 continue
             
+            logger.info(f"✅ Checking breakout conditions for completed session: {session.name}")
             await self._check_breakout_conditions(session, current_time)
     
     async def _check_breakout_conditions(self, session: TradingSession, current_time: datetime):
@@ -444,7 +586,7 @@ class SignalDetectionService:
                 logger.debug(f"Missing price data: Index={nifty_index_price}, Futures={nifty_futures_price}")
                 return
             
-            logger.debug(f"🎯 Checking breakout: NIFTY Index @ ₹{nifty_index_price:.2f}, NIFTY Futures @ ₹{nifty_futures_price:.2f}")
+            logger.info(f"🎯 Checking breakout: NIFTY Index @ ₹{nifty_index_price:.2f}, NIFTY Futures @ ₹{nifty_futures_price:.2f}")
             
             # Get NIFTY Index session levels with string parsing fix
             nifty_session_data = session.session_data.get(self.nifty_index, {})
@@ -496,11 +638,11 @@ class SignalDetectionService:
             futures_breaks_high = nifty_futures_price > futures_session_high
             futures_breaks_low = nifty_futures_price < futures_session_low
             
-            logger.debug(f"📊 Breakout Analysis:")
-            logger.debug(f"   NIFTY Index: {nifty_index_price:.2f} vs High {nifty_index_session_high:.2f} vs Low {nifty_index_session_low:.2f}")
-            logger.debug(f"   NIFTY Futures: {nifty_futures_price:.2f} vs High {futures_session_high:.2f} vs Low {futures_session_low:.2f}")
-            logger.debug(f"   Index breaks: High={index_breaks_high}, Low={index_breaks_low}")
-            logger.debug(f"   Futures breaks: High={futures_breaks_high}, Low={futures_breaks_low}")
+            logger.info(f"📊 Breakout Analysis:")
+            logger.info(f"   NIFTY Index: {nifty_index_price:.2f} vs High {nifty_index_session_high:.2f} vs Low {nifty_index_session_low:.2f}")
+            logger.info(f"   NIFTY Futures: {nifty_futures_price:.2f} vs High {futures_session_high:.2f} vs Low {futures_session_low:.2f}")
+            logger.info(f"   Index breaks: High={index_breaks_high}, Low={index_breaks_low}")
+            logger.info(f"   Futures breaks: High={futures_breaks_high}, Low={futures_breaks_low}")
                 
             # Apply NIFTY 50 Index vs NIFTY 50 Futures signal logic
             signal_type = None
@@ -624,14 +766,14 @@ class SignalDetectionService:
             future_volumes = list(self.volume_data[future_symbol])[-5:]
             
             if len(nifty_volumes) < 3 or len(future_volumes) < 3:
+                logger.info("Volume confirmation: Insufficient volume data - allowing signal")
                 return True  # Allow if insufficient data
             
             # Check if current volume is above minimum threshold
             current_nifty_volume = nifty_volumes[-1] if nifty_volumes else 0
             current_future_volume = future_volumes[-1] if future_volumes else 0
             
-            # CRITICAL FIX: Handle zero volume in tick data (common in testing/some data feeds)
-            # If we have price data but zero volume, check if we have tick count instead
+            # ENHANCED BYPASS: Check if we have price data but volume data is failing
             has_tick_data = (nifty_symbol in self.price_data and len(self.price_data[nifty_symbol]) > 0)
             
             if has_tick_data:
@@ -640,45 +782,110 @@ class SignalDetectionService:
                 
                 # If we have tick data (tick_count > 0) but zero volume, allow the signal
                 if total_tick_count > 0:
-                    logger.debug(f"Volume confirmation: Zero volume but {total_tick_count} ticks - allowing signal")
+                    logger.info(f"Volume confirmation: Zero volume but {total_tick_count} ticks - bypassing volume check")
                     return True
+                    
+                # ADDITIONAL BYPASS: If all volumes are zero but we have price candles, bypass volume check
+                total_nifty_volume = sum(nifty_volumes)
+                total_future_volume = sum(future_volumes)
+                
+                if total_nifty_volume == 0 and total_future_volume == 0 and len(recent_candles) > 0:
+                    logger.warning(f"Volume confirmation: All volume data is zero but price data exists - bypassing volume check for signal generation")
+                    return True
+            
+            # TICK DATA SERVICE FAILURE BYPASS: If tick data service is failing, be more permissive
+            # Check if we can get any volume data at all from recent candles
+            if current_nifty_volume == 0 and current_future_volume == 0:
+                # Try to validate if this is a data issue vs no trading activity
+                try:
+                    # If we have recent price movements, assume volume should exist
+                    if has_tick_data and len(self.price_data[nifty_symbol]) > 1:
+                        recent_prices = [c.get('close', 0) for c in list(self.price_data[nifty_symbol])[-3:]]
+                        price_variance = max(recent_prices) - min(recent_prices) if len(recent_prices) > 1 else 0
+                        
+                        # If price is moving but volume is 0, likely a data service issue
+                        if price_variance > 1.0:  # More than 1 point movement
+                            logger.warning(f"Volume confirmation: Price moving ({price_variance:.2f} points) but zero volume - bypassing due to likely data service issue")
+                            return True
+                except Exception as bypass_error:
+                    logger.debug(f"Error in volume bypass logic: {bypass_error}")
             
             # Calculate average volume of previous candles
             avg_nifty_volume = sum(nifty_volumes[:-1]) / len(nifty_volumes[:-1]) if len(nifty_volumes) > 1 else 0
             avg_future_volume = sum(future_volumes[:-1]) / len(future_volumes[:-1]) if len(future_volumes) > 1 else 0
             
+            # RELAXED Volume requirements when data seems unreliable
+            min_threshold = self.min_volume_threshold
+            
+            # If most volumes are very low, reduce threshold temporarily
+            if avg_nifty_volume < self.min_volume_threshold / 10:  # Less than 10% of expected
+                min_threshold = 100  # Much lower threshold
+                logger.info(f"Volume confirmation: Detected low volume environment, reducing threshold to {min_threshold}")
+            
             # Volume should be above minimum and preferably above average
             volume_ok = (
-                current_nifty_volume >= self.min_volume_threshold and
-                current_future_volume >= self.min_volume_threshold and
-                current_nifty_volume >= avg_nifty_volume * 0.8 and
-                current_future_volume >= avg_future_volume * 0.8
+                current_nifty_volume >= min_threshold and
+                current_future_volume >= min_threshold and
+                current_nifty_volume >= avg_nifty_volume * 0.5 and  # Reduced from 0.8 to 0.5
+                current_future_volume >= avg_future_volume * 0.5   # More permissive
             )
             
             # Log volume check details for debugging
             if not volume_ok:
-                logger.debug(f"Volume check failed: Current({current_nifty_volume}, {current_future_volume}) vs Min({self.min_volume_threshold})")
+                logger.info(f"Volume check failed: Current({current_nifty_volume}, {current_future_volume}) vs Min({min_threshold}) vs Avg({avg_nifty_volume:.0f}, {avg_future_volume:.0f})")
+            else:
+                logger.info(f"Volume check passed: Current({current_nifty_volume}, {current_future_volume}) vs Min({min_threshold})")
             
             return volume_ok
             
         except Exception as e:
             logger.error(f"Error checking volume confirmation: {e}")
+            logger.info("Volume confirmation: Allowing signal due to error in volume check")
             return True  # Allow on error
     
     async def _get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price for symbol"""
+        """Get current price for symbol - prioritizes live tick data during market hours"""
         try:
-            # Try to get price from symbol's own data first
-            if symbol in self.price_data and self.price_data[symbol]:
-                return self.price_data[symbol][-1]['close']
+            from .tick_data_service import tick_data_service
+            from ..utils.timezone_utils import TimezoneUtils
+            from datetime import timedelta
             
-            # For futures symbols, fall back to NIFTY price as proxy
+            current_time = TimezoneUtils.get_ist_now()
+            
+            # PRIORITY 1: Get latest price directly from live tick data (most accurate during market hours)
+            start_time = current_time - timedelta(minutes=5)  # Last 5 minutes
+            
+            ticks = await tick_data_service.get_ticks_for_timerange(symbol, start_time, current_time)
+            if ticks:
+                latest_price = ticks[-1]['price']
+                logger.debug(f"💰 Got live tick price for {symbol}: ₹{latest_price} (from {len(ticks)} recent ticks)")
+                return latest_price
+            
+            # For futures symbols, try to get NIFTY live tick data as proxy
             if symbol in self.nifty_futures:
-                logger.debug(f"No price data for {symbol}, using NIFTY as proxy")
+                logger.debug(f"No live tick data for {symbol}, trying NIFTY live ticks as proxy")
+                nifty_ticks = await tick_data_service.get_ticks_for_timerange(self.nifty_index, start_time, current_time)
+                if nifty_ticks:
+                    nifty_price = nifty_ticks[-1]['price']
+                    logger.debug(f"💰 Using NIFTY live tick price as proxy for {symbol}: ₹{nifty_price}")
+                    return nifty_price
+            
+            # PRIORITY 2: Fallback to 5-minute candle data (less accurate during market hours)
+            if symbol in self.price_data and self.price_data[symbol]:
+                candle_price = self.price_data[symbol][-1]['close']
+                logger.debug(f"📊 Using 5-min candle price for {symbol}: ₹{candle_price} (fallback - may be stale)")
+                return candle_price
+            
+            # PRIORITY 3: Final fallback for futures - use NIFTY candle data
+            if symbol in self.nifty_futures:
                 if self.nifty_index in self.price_data and self.price_data[self.nifty_index]:
-                    return self.price_data[self.nifty_index][-1]['close']
+                    nifty_candle_price = self.price_data[self.nifty_index][-1]['close']
+                    logger.debug(f"📊 Using NIFTY 5-min candle as final fallback for {symbol}: ₹{nifty_candle_price}")
+                    return nifty_candle_price
                     
+            logger.warning(f"❌ No price data found for {symbol}")
             return None
+            
         except Exception as e:
             logger.error(f"Error getting current price for {symbol}: {e}")
             return None

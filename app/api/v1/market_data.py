@@ -335,18 +335,18 @@ async def get_chart_data(
         collection = get_collection("tick_data")
         cursor = collection.find({
             'symbol': symbol.upper(),
-            'timestamp': {
+            'received_at': {
                 '$gte': date_start,
                 '$lt': date_end
             }
-        }).sort('timestamp', 1)
+        }).sort('received_at', 1)
         
         # Fetch tick data
         tick_data = []
         async for doc in cursor:
             tick_data.append({
                 'price': doc.get('price'),
-                'timestamp': doc.get('timestamp'),  # Naive IST from database
+                'timestamp': doc.get('received_at'),  # Use received_at for accurate timing
                 'symbol': doc.get('symbol'),
                 'exchange': doc.get('exchange', 'NSE')
             })
@@ -604,7 +604,7 @@ async def get_market_overview():
         # Get symbol count from tick data
         tick_collection = tick_data_service._get_collection()
         total_symbols = await tick_collection.distinct("symbol", {
-            "timestamp": {"$gte": today_start}
+            "received_at": {"$gte": today_start}
         })
         overview_data["summary"]["total_symbols"] = len(total_symbols)
         overview_data["summary"]["active_symbols"] = len(overview_data["indices"])
@@ -642,7 +642,7 @@ async def get_available_symbols():
         tick_pipeline = [
             {
                 "$match": {
-                    "timestamp": {
+                    "received_at": {
                         "$gte": today_start,
                         "$lt": today_end
                     }
