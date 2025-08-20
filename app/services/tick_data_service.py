@@ -340,7 +340,7 @@ class TickDataService:
             collection = self._get_collection()
             
             query = {'symbol': symbol.upper()}
-            cursor = collection.find(query).sort('timestamp', -1).limit(limit)
+            cursor = collection.find(query).sort('received_at', -1).limit(limit)
             
             ticks = []
             async for doc in cursor:
@@ -358,9 +358,18 @@ class TickDataService:
         self, 
         symbol: str, 
         start_time: datetime, 
-        end_time: datetime
+        end_time: datetime,
+        use_received_at: bool = True
     ) -> List[Dict[str, Any]]:
-        """Get ticks for a specific time range with production timezone handling"""
+        """Get ticks for a specific time range with production timezone handling
+        
+        Args:
+            symbol: Symbol to query
+            start_time: Start time for the range
+            end_time: End time for the range
+            use_received_at: If True, use 'received_at' field instead of 'timestamp'
+                           Default is True for accurate system timing. Set to False for market timing.
+        """
         try:
             collection = self._get_collection()
             
@@ -368,28 +377,31 @@ class TickDataService:
             start_time_ist = TimezoneUtils.to_ist(start_time)
             end_time_ist = TimezoneUtils.to_ist(end_time)
             
+            # Choose timestamp field based on use_received_at parameter
+            timestamp_field = 'received_at' if use_received_at else 'timestamp'
+            
             # Debug logging to track timezone conversion
-            self.logger.debug(f"Timezone conversion for {symbol}:")
+            self.logger.debug(f"Timezone conversion for {symbol} using {timestamp_field}:")
             self.logger.debug(f"  Input IST: {start_time} to {end_time}")
             self.logger.debug(f"  Query IST: {start_time_ist} to {end_time_ist}")
             
             # Query with proper timezone handling
             query = {
                 'symbol': symbol.upper(),
-                'timestamp': {
+                timestamp_field: {
                     '$gte': start_time_ist,
                     '$lte': end_time_ist
                 }
             }
             
-            cursor = collection.find(query).sort('timestamp', 1)
+            cursor = collection.find(query).sort(timestamp_field, 1)
             
             ticks = []
             async for doc in cursor:
                 doc['_id'] = str(doc['_id'])
                 ticks.append(doc)
             
-            self.logger.debug(f"Found {len(ticks)} ticks for {symbol} in range {start_time} to {end_time}")
+            self.logger.debug(f"Found {len(ticks)} ticks for {symbol} in range {start_time} to {end_time} using {timestamp_field}")
             return ticks
             
         except Exception as e:
@@ -405,7 +417,7 @@ class TickDataService:
             collection = self._get_collection()
             
             result = await collection.delete_many({
-                'timestamp': {'$lt': cutoff_date}
+                'received_at': {'$lt': cutoff_date}
             })
             
             self.logger.info(f"🗑️ Cleaned up {result.deleted_count} old ticks")
@@ -435,12 +447,12 @@ class TickDataService:
                 symbol_stats.append(doc)
             
             # Latest tick
-            latest_tick = await collection.find_one({}, sort=[('timestamp', -1)])
+            latest_tick = await collection.find_one({}, sort=[('received_at', -1)])
             
             return {
                 'total_ticks': total_count,
                 'symbol_distribution': symbol_stats,
-                'latest_tick_time': latest_tick.get('timestamp') if latest_tick else None,
+                'latest_tick_time': latest_tick.get('received_at') if latest_tick else None,
                 'buffer_size': sum(len(ticks) for ticks in self.tick_buffer.values()),
                 'market_hours': self._is_market_hours()
             }

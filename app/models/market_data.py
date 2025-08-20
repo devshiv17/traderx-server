@@ -63,30 +63,11 @@ class MarketDataModel(BaseModel):
     
     @staticmethod
     def _get_symbol_from_token(token: str) -> str:
-        """Map token to symbol name"""
+        """Map token to symbol name - NIFTY INDEX AND FUTURES ONLY"""
         token_map = {
-            # Primary Indices
-            "99926000": "NIFTY50",
-            "99926009": "BANKNIFTY", 
-            "99926037": "FINNIFTY",
-            "26000": "SENSEX",
-            
-            # Major stocks
-            "2885": "RELIANCE",
-            "11536": "TCS",
-            "341": "HDFCBANK",
-            "1594": "INFY",
-            "4963": "ICICIBANK",
-            "3045": "HINDUNILVR",
-            "4244": "ITC",
-            "822": "BHARTIARTL",
-            "590": "AXISBANK",
-            
-            # Old tokens (for backward compatibility)
-            "26009": "NIFTY_OLD",
-            "26017": "BANKNIFTY_OLD",
-            "26037": "FINNIFTY_OLD",
-            "1": "SENSEX_OLD"
+            # Primary NIFTY tokens only
+            "99926000": "NIFTY",           # NIFTY Index
+            "64103": "NIFTY28AUG25FUT",   # NIFTY Futures
         }
         return token_map.get(token, f"TOKEN_{token}")
     
@@ -96,7 +77,7 @@ class MarketDataModel(BaseModel):
         json_encoders = {ObjectId: str}
         json_schema_extra = {
             "example": {
-                "tk": "26009",
+                "tk": "99926000",
                 "symbol": "NIFTY",
                 "exchange": "NSE",
                 "ltpc": 22450.75,
@@ -112,8 +93,8 @@ class MarketDataModel(BaseModel):
                 "bid_qty": 100,
                 "ask_qty": 150,
                 "exchange_type": 1,
-                "token": "26009",
-                "instrument_type": "EQ",
+                "token": "99926000",
+                "instrument_type": "INDEX",
                 "source": "angel_one_websocket",
                 "processed": False,
                 "is_realtime": True
@@ -155,7 +136,7 @@ class MarketDataResponse(BaseModel):
         json_schema_extra = {
             "example": {
                 "id": "507f1f77bcf86cd799439013",
-                "tk": "26009",
+                "tk": "99926000",
                 "symbol": "NIFTY",
                 "exchange": "NSE",
                 "ltpc": 22450.75,
@@ -171,8 +152,8 @@ class MarketDataResponse(BaseModel):
                 "bid_qty": 100,
                 "ask_qty": 150,
                 "exchange_type": 1,
-                "token": "26009",
-                "instrument_type": "EQ",
+                "token": "99926000",
+                "instrument_type": "INDEX",
                 "received_at": "2024-01-15T10:30:00Z",
                 "source": "angel_one_websocket",
                 "processed": False,

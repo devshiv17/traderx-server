@@ -122,7 +122,7 @@ async def get_signals_direct():
                 "timezone": "IST",
                 "market_status": "open" if TimezoneUtils.is_market_hours() else "closed",
                 "source": "direct_mongodb_production",
-                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_ist_now())
             },
             status_code=status.HTTP_200_OK
         )
@@ -142,7 +142,7 @@ async def get_signals_direct():
                 "filtered_by": "today_only_production",
                 "timezone": "IST",
                 "source": "direct_mongodb_failed",
-                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_ist_now())
             },
             status_code=status.HTTP_200_OK
         )
@@ -459,7 +459,7 @@ async def get_session_status():
                 "current_time_ist": TimezoneUtils.format_for_api(current_time_ist),
                 "timezone": "IST",
                 "market_status": "open" if TimezoneUtils.is_market_hours() else "closed",
-                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_ist_now())
             },
             status_code=status.HTTP_200_OK
         )
@@ -480,7 +480,7 @@ async def get_session_status():
                 "filtered_by": "today_only_production",
                 "timezone": "IST",
                 "error": str(e),
-                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_utc_now())
+                "timestamp": TimezoneUtils.format_for_api(TimezoneUtils.get_ist_now())
             },
             status_code=status.HTTP_200_OK
         )
@@ -924,6 +924,101 @@ async def get_signals_with_breakout_details(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve signals with breakout details: {str(e)}"
+        )
+
+
+@router.post("/signals/debug/manual-check")
+async def debug_manual_breakout_check():
+    """
+    DEBUG: Manually trigger breakout checking for completed sessions
+    """
+    try:
+        from ...services.signal_detection_service import signal_detection_service
+        
+        current_time = TimezoneUtils.get_ist_now()
+        logger.info(f"🔧 DEBUG: Manual breakout check triggered at {current_time.strftime('%H:%M:%S')}")
+        
+        # Get current prices
+        nifty_price_result = await signal_detection_service._get_current_price("NIFTY")
+        futures_price_result = await signal_detection_service._get_current_price("NIFTY28AUG25FUT")
+        
+        debug_info = {
+            "current_time": current_time.isoformat(),
+            "current_prices": {
+                "nifty": nifty_price_result,
+                "futures": futures_price_result
+            },
+            "sessions_status": [],
+            "breakout_analysis": []
+        }
+        
+        # Check each completed session
+        for session in signal_detection_service.sessions:
+            session_status = {
+                "name": session.name,
+                "is_active": session.is_active,
+                "is_completed": session.is_completed,
+                "session_data": {}
+            }
+            
+            # Get session data
+            if hasattr(session, 'session_data') and session.session_data:
+                for symbol, data in session.session_data.items():
+                    if isinstance(data, dict):
+                        session_status["session_data"][symbol] = {
+                            "high": data.get('high'),
+                            "low": data.get('low'),
+                            "ticks_count": len(data.get('all_ticks', [])),
+                            "candles_count": len(data.get('candles', []))
+                        }
+            
+            debug_info["sessions_status"].append(session_status)
+            
+            # If session should be completed, force check breakouts
+            session_date = current_time.date()
+            session_start_time = TimezoneUtils.to_ist(
+                datetime.combine(session_date, datetime.strptime(session.start_time, "%H:%M").time())
+            )
+            session_end_time = TimezoneUtils.to_ist(
+                datetime.combine(session_date, datetime.strptime(session.end_time, "%H:%M").time())
+            )
+            
+            if current_time > session_end_time:
+                logger.info(f"🔧 DEBUG: Manually checking breakouts for {session.name}")
+                try:
+                    await signal_detection_service._check_breakout_conditions(session, current_time)
+                    debug_info["breakout_analysis"].append({
+                        "session": session.name,
+                        "checked": True,
+                        "error": None
+                    })
+                except Exception as e:
+                    debug_info["breakout_analysis"].append({
+                        "session": session.name,
+                        "checked": False,
+                        "error": str(e)
+                    })
+        
+        return JSONResponse(
+            content={
+                "message": "Manual breakout check completed",
+                "debug_info": debug_info,
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in manual breakout check: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 

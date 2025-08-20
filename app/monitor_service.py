@@ -33,14 +33,10 @@ async def check_service_health():
             # Get available symbols directly from the service
             symbols = await market_data_service.get_available_symbols()
             
-            # Filter to only show the indices we want
+            # Filter to only show NIFTY index and futures
             allowed_symbols = [
-                {"symbol": "NIFTY", "name": "NIFTY 50", "exchange": "NFO"},
-                {"symbol": "BANKNIFTY", "name": "BANKNIFTY", "exchange": "NFO"},
-                {"symbol": "FINNIFTY", "name": "FINNIFTY", "exchange": "NFO"},
-                {"symbol": "MIDCPNIFTY", "name": "MIDCPNIFTY", "exchange": "NFO"},
-                {"symbol": "SENSEX", "name": "SENSEX", "exchange": "BFO"},
-                {"symbol": "BANKEX", "name": "BANKEX", "exchange": "BFO"}
+                {"symbol": "NIFTY", "name": "NIFTY 50", "exchange": "NSE"},
+                {"symbol": "NIFTY28AUG25FUT", "name": "NIFTY August 2025 Futures", "exchange": "NFO"}
             ]
             
             # Filter to only include symbols that have data
