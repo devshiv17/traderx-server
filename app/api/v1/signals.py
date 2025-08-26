@@ -927,6 +927,92 @@ async def get_signals_with_breakout_details(
         )
 
 
+@router.post("/signals/debug/force-signal")
+async def debug_force_signal_generation():
+    """
+    DEBUG: Force generate a test signal to verify the pipeline works
+    """
+    try:
+        from ...services.signal_detection_service import signal_detection_service
+        from ...utils.timezone_utils import TimezoneUtils
+        
+        current_time = TimezoneUtils.get_ist_now()
+        logger.info(f"🔧 DEBUG: Force generating test signal at {current_time.strftime('%H:%M:%S')}")
+        
+        # Get current prices
+        nifty_price = await signal_detection_service._get_current_price("NIFTY")
+        futures_price = await signal_detection_service._get_current_price("NIFTY28AUG25FUT")
+        
+        if not nifty_price or not futures_price:
+            return JSONResponse(
+                content={
+                    "error": "Could not get current prices",
+                    "nifty_price": nifty_price,
+                    "futures_price": futures_price,
+                    "timestamp": TimezoneUtils.get_ist_now().isoformat()
+                },
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create a dummy session for testing
+        from ...services.signal_detection_service import TradingSession
+        test_session = TradingSession("DEBUG_TEST", "10:00", "10:05")
+        test_session.is_completed = True
+        
+        # Set dummy session data that will trigger a breakout
+        test_session.session_data = {
+            "NIFTY": {
+                "high": nifty_price - 5,  # 5 points below current (will trigger high breakout)
+                "low": nifty_price - 50,  # 50 points below current
+            },
+            "NIFTY28AUG25FUT": {
+                "high": futures_price - 5,  # 5 points below current (will trigger high breakout)
+                "low": futures_price - 50,  # 50 points below current
+            }
+        }
+        
+        # Force generate a signal
+        await signal_detection_service._generate_signal(
+            session=test_session,
+            signal_type="BUY_CALL",
+            reason="FORCED DEBUG TEST - Both instruments broke dummy session high",
+            timestamp=current_time,
+            nifty_price=nifty_price,
+            future_price=futures_price,
+            future_symbol="NIFTY28AUG25FUT"
+        )
+        
+        return JSONResponse(
+            content={
+                "message": "Force signal generation completed",
+                "test_session": {
+                    "name": test_session.name,
+                    "session_data": test_session.session_data
+                },
+                "prices": {
+                    "nifty": nifty_price,
+                    "futures": futures_price
+                },
+                "expected_signal": "BUY_CALL",
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in force signal generation: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
 @router.post("/signals/debug/manual-check")
 async def debug_manual_breakout_check():
     """
@@ -1141,6 +1227,64 @@ async def get_signals_by_session(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve signals by session"
+        )
+
+
+@router.post("/signals/debug/test-db")
+async def test_signal_database():
+    """
+    Test signal database by directly inserting a signal
+    """
+    try:
+        from ...core.database import get_collection
+        from ...utils.timezone_utils import TimezoneUtils
+        
+        current_time = TimezoneUtils.get_ist_now()
+        
+        # Create a simple test signal
+        test_signal = {
+            'id': f"TEST_{current_time.strftime('%H%M%S')}",
+            'session_name': 'TEST_SESSION',
+            'signal_type': 'BUY_CALL',
+            'reason': 'Database connection test',
+            'timestamp': current_time,
+            'nifty_price': 25000.0,
+            'future_price': 25000.0,
+            'future_symbol': 'TEST_FUTURE',
+            'entry_price': 25000.0,
+            'stop_loss': 24900.0,
+            'target_1': 25100.0,
+            'target_2': 25200.0,
+            'confidence': 75,
+            'status': 'ACTIVE',
+            'created_at': current_time,
+            'updated_at': current_time
+        }
+        
+        # Insert directly into database
+        signals_collection = get_collection('signals')
+        result = await signals_collection.insert_one(test_signal)
+        
+        return JSONResponse(
+            content={
+                "message": "Test signal inserted successfully",
+                "signal_id": test_signal['id'],
+                "database_id": str(result.inserted_id),
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        logger.error(f"Database test failed: {e}")
+        import traceback
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": TimezoneUtils.get_ist_now().isoformat()
+            },
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 

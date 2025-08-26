@@ -8,6 +8,13 @@ source venv/bin/activate
 # Kill any existing server on port 8000
 echo "🧹 Cleaning up any existing servers..."
 pkill -f "uvicorn.*app.main.*8000" 2>/dev/null || true
+
+# Also kill any process using port 8000
+PORT_PID=$(lsof -ti :8000 2>/dev/null || true)
+if [ ! -z "$PORT_PID" ]; then
+    echo "🔧 Found process $PORT_PID using port 8000, terminating..."
+    kill -9 $PORT_PID 2>/dev/null || true
+fi
 sleep 2
 
 # Start server with better persistence
