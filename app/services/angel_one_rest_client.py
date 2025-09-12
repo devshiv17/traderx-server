@@ -122,7 +122,7 @@ class AngelOneRestClient:
         # You'll need to get the correct token mapping from Angel One
         symbol_to_token = {
             "NIFTY": "99926000",           # NIFTY Index
-            "NIFTY28AUG25FUT": "64103"     # NIFTY Futures
+            "NIFTY30SEP25FUT": "53001"     # NIFTY Futures
         }
         
         tokens = []

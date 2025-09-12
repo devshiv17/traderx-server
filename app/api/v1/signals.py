@@ -941,7 +941,7 @@ async def debug_force_signal_generation():
         
         # Get current prices
         nifty_price = await signal_detection_service._get_current_price("NIFTY")
-        futures_price = await signal_detection_service._get_current_price("NIFTY28AUG25FUT")
+        futures_price = await signal_detection_service._get_current_price("NIFTY30SEP25FUT")
         
         if not nifty_price or not futures_price:
             return JSONResponse(
@@ -965,7 +965,7 @@ async def debug_force_signal_generation():
                 "high": nifty_price - 5,  # 5 points below current (will trigger high breakout)
                 "low": nifty_price - 50,  # 50 points below current
             },
-            "NIFTY28AUG25FUT": {
+            "NIFTY30SEP25FUT": {
                 "high": futures_price - 5,  # 5 points below current (will trigger high breakout)
                 "low": futures_price - 50,  # 50 points below current
             }
@@ -979,7 +979,7 @@ async def debug_force_signal_generation():
             timestamp=current_time,
             nifty_price=nifty_price,
             future_price=futures_price,
-            future_symbol="NIFTY28AUG25FUT"
+            future_symbol="NIFTY30SEP25FUT"
         )
         
         return JSONResponse(
@@ -1026,7 +1026,7 @@ async def debug_manual_breakout_check():
         
         # Get current prices
         nifty_price_result = await signal_detection_service._get_current_price("NIFTY")
-        futures_price_result = await signal_detection_service._get_current_price("NIFTY28AUG25FUT")
+        futures_price_result = await signal_detection_service._get_current_price("NIFTY30SEP25FUT")
         
         debug_info = {
             "current_time": current_time.isoformat(),
