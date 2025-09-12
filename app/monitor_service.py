@@ -36,7 +36,7 @@ async def check_service_health():
             # Filter to only show NIFTY index and futures
             allowed_symbols = [
                 {"symbol": "NIFTY", "name": "NIFTY 50", "exchange": "NSE"},
-                {"symbol": "NIFTY28AUG25FUT", "name": "NIFTY August 2025 Futures", "exchange": "NFO"}
+                {"symbol": "NIFTY30SEP25FUT", "name": "NIFTY September 2025 Futures", "exchange": "NFO"}
             ]
             
             # Filter to only include symbols that have data

@@ -67,7 +67,7 @@ class MarketDataModel(BaseModel):
         token_map = {
             # Primary NIFTY tokens only
             "99926000": "NIFTY",           # NIFTY Index
-            "64103": "NIFTY28AUG25FUT",   # NIFTY Futures
+            "53001": "NIFTY30SEP25FUT",   # NIFTY Futures
         }
         return token_map.get(token, f"TOKEN_{token}")
     

@@ -246,7 +246,7 @@ class AngelOneService:
                 # Try current month NIFTY futures tokens - Aug 2025
                 # Only NIFTY futures for focused trading strategy
                 known_futures_tokens = [
-                    "64103",    # NIFTY28AUG25FUT - Only NIFTY futures needed
+                    "53001",    # NIFTY30SEP25FUT - Only NIFTY futures needed
                 ]
                 logger.info(f"Trying {len(known_futures_tokens)} known NIFTY futures tokens for August 2025...")
                 
@@ -331,7 +331,7 @@ class AngelOneService:
         return on_open, on_data, on_error, on_close
     
     def _get_limited_market_tokens(self):
-        """Get only 2 tokens for rate-limited WebSocket: NIFTY + NIFTY28AUG25FUT"""
+        """Get only 2 tokens for rate-limited WebSocket: NIFTY + NIFTY30SEP25FUT"""
         limited_tokens = []
         
         # 1. NIFTY Index token
